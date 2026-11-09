@@ -9,6 +9,8 @@ import time
 import tkinter as tk
 from tkinter import ttk, messagebox
 
+from pc_fish_data import GameData
+
 RARITIES = ("기본", "일반", "고급", "희귀", "전설", "신화")
 DATA = Path(os.environ.get("LOCALAPPDATA", ".")) / "PCFishHelper" / "settings.json"
 U = C.WinDLL("user32")
@@ -96,6 +98,21 @@ def click(template):
     return True
 
 
+def match_badge(frame, samples):
+    # DIB rows are bottom-up. A small search tolerates registration offsets.
+    width, height = 42, 24
+    stride = 52 * 4
+    for top in range(11):
+        for left in range(11):
+            start = top * stride + left * 4
+            badge = b"".join(frame[offset:offset + width * 4]
+                             for offset in range(start, start + stride * height, stride))
+            rating = samples.get(badge)
+            if rating is not None:
+                return rating
+    return None
+
+
 def merge_distribution(levels):
     if len(levels) != 10 or any(level not in range(1, 6) for level in levels):
         raise ValueError("기본 물고기를 제외한 재료 10마리가 필요합니다.")
@@ -113,6 +130,12 @@ class Helper:
         self.root = root
         self.data = json.loads(DATA.read_text(encoding="utf-8")) if DATA.exists() else {}
         self.fish = self.data.setdefault("fish", [])
+        self.game = None
+        self.synced_state = None
+        self.mergeable = None
+        self.next_sync = 0
+        self.waiting = None
+        self.dynamic = None
         self.routes = self.data.setdefault("routes", [])
         self.running = [tk.BooleanVar(), tk.BooleanVar()]
         self.steps = []
@@ -121,7 +144,7 @@ class Helper:
         self.deadline = 0
         self.status = tk.StringVar(value="자동화 꺼짐")
         root.title("PC FISH 보조 도구")
-        root.geometry("760x530")
+        root.geometry("800x570")
         tabs = ttk.Notebook(root)
         tabs.pack(fill="both", expand=True, padx=12, pady=12)
         auto, inventory, merge = (ttk.Frame(tabs, padding=12) for _ in range(3))
@@ -151,6 +174,32 @@ class Helper:
         self.route_name.insert(0, "교배 후보 조합")
         self.route_name.pack(fill="x")
         self.refresh_routes()
+        extra = ttk.Frame(auto)
+        extra.pack(fill="x", pady=8)
+        ttk.Button(extra, text="교배 결과 닫기 등록",
+                   command=lambda: self.record_action("dismiss")).pack(side="left")
+        ttk.Button(extra, text="수조 탭 등록",
+                   command=lambda: self.record_action("tank_tab")).pack(side="left")
+        ttk.Button(extra, text="교배 탭 등록",
+                   command=lambda: self.record_action("breed_tab")).pack(side="left")
+        ttk.Button(extra, text="등록 중인 단계 초기화", command=self.steps.clear).pack(side="left")
+        scan = ttk.LabelFrame(auto, text="후보 자동 선택 · 한국어 UI 1배율", padding=6)
+        scan.pack(fill="x", pady=4)
+        self.scan_order = ttk.Combobox(scan, state="readonly", width=18,
+                                       values=("희귀도 높은 순", "희귀도 낮은 순", "별 등급 높은 순", "별 등급 낮은 순"))
+        self.scan_order.current(self.data.get("scan_order", 0))
+        self.scan_order.bind("<<ComboboxSelected>>", self.save_scan_order)
+        self.scan_order.pack(side="left", padx=3)
+        self.calibration = ttk.Combobox(scan, state="readonly", width=12,
+            values=("첫 부모 슬롯", "둘째 부모 슬롯", "후보 첫 카드", "활성 교배 버튼"))
+        self.calibration.current(0)
+        self.calibration.pack(side="left", padx=3)
+        ttk.Button(scan, text="위치 등록", command=self.record_scan).pack(side="left")
+        self.badge = ttk.Combobox(scan, state="readonly", width=12,
+            values=["기본"] + [f"{rarity} {star}성" for rarity in RARITIES[1:] for star in range(1, 6)])
+        self.badge.current(0)
+        self.badge.pack(side="left", padx=(10, 3))
+        ttk.Button(scan, text="후보 등급 등록", command=self.record_badge).pack(side="left")
 
         form = ttk.Frame(inventory)
         form.pack(fill="x")
@@ -166,7 +215,12 @@ class Helper:
         self.amount.set(1)
         self.amount.pack(side="left")
         ttk.Button(form, text="보유 수량 저장", command=self.save_fish).pack(side="left")
+        self.sync_status = tk.StringVar(value="로컬 도감 읽는 중")
+        ttk.Label(inventory, textvariable=self.sync_status).pack(anchor="w", pady=4)
         ttk.Label(inventory, text="어종 이름 · 희귀도 · 별 등급 · 현재 보유 수량").pack(anchor="w")
+        self.owned_only = tk.BooleanVar(value=False)
+        ttk.Checkbutton(inventory, text="보유한 어종만", variable=self.owned_only,
+                        command=self.refresh_inventory).pack(anchor="w")
         self.inventory = tk.Listbox(inventory)
         self.inventory.pack(fill="both", expand=True, pady=8)
         self.inventory.bind("<<ListboxSelect>>", self.load_fish)
@@ -192,8 +246,40 @@ class Helper:
         self.result = tk.StringVar()
         ttk.Label(merge, textvariable=self.result, wraplength=690).pack(anchor="w")
         self.materials = {}
+        self.season = ttk.Combobox(merge, state="readonly")
+        self.season.pack(fill="x", pady=(8, 2))
+        self.season.bind("<<ComboboxSelected>>", lambda _event: self.show_recipe())
+        self.recipe_summary = tk.StringVar()
+        ttk.Label(merge, textvariable=self.recipe_summary, wraplength=730).pack(anchor="w")
         self.refresh_inventory()
         self.root.after(200, self.tick)
+
+    def sync(self):
+        now = time.monotonic()
+        if now < self.next_sync:
+            return
+        self.next_sync = now + 2
+        try:
+            if self.game is None:
+                self.game = GameData()
+            state = self.game.state()
+            fish, mergeable = self.game.rows()
+            if fish != self.fish or mergeable != self.mergeable:
+                self.fish, self.mergeable = fish, mergeable
+                self.materials.clear()
+                self.refresh_inventory()
+            self.synced_state = state
+            if not self.season.cget("values") and self.game.recipes:
+                self.season["values"] = ["시즌 레시피 선택"] + [
+                    f"시즌 {season} · {name} · {stars}성"
+                    for season, name, stars in sorted(self.game.recipes)]
+                self.season.current(0)
+            self.show_recipe()
+            owned = sum(row[3] for row in self.fish)
+            self.sync_status.set(f"게임 동기화 · 보유 {owned}마리 · 수조 Lv.{state['tankLevel']}")
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            self.synced_state = None
+            self.sync_status.set(f"게임 동기화 대기 · {error}")
 
     def save(self):
         DATA.parent.mkdir(parents=True, exist_ok=True)
@@ -203,6 +289,8 @@ class Helper:
 
     def toggle(self):
         self.pending.clear()
+        self.dynamic = None
+        self.waiting = None
         self.status.set("등록된 게임 화면 대기 중" if any(f.get() for f in self.running) else "자동화 꺼짐")
 
     def refresh_routes(self):
@@ -234,9 +322,11 @@ class Helper:
         for flag in self.running:
             flag.set(False)
         self.pending.clear()
+        self.dynamic = None
+        self.waiting = None
         self.status.set(reason)
 
-    def record(self, callback):
+    def record(self, callback, width=24, height=24):
         self.stop("4초 안에 대상 버튼 위에 마우스를 놓으세요.")
         self.root.iconify()
 
@@ -247,7 +337,7 @@ class Helper:
                 if not game_at(position.x, position.y):
                     self.status.set("등록 실패 · 포인터 아래에서 PC FISH 버튼을 찾지 못했습니다.")
                     return
-                snapshot = capture(position.x, position.y)
+                snapshot = capture(position.x, position.y, width, height)
                 callback([position.x, position.y, base64.b64encode(snapshot).decode("ascii")])
             except OSError as error:
                 self.status.set(str(error))
@@ -272,17 +362,80 @@ class Helper:
         self.refresh_routes()
         self.save()
 
-    def record_upgrade(self):
-        def set_upgrade(step):
-            self.data["upgrade"] = step
+    def save_scan_order(self, _event):
+        self.data["scan_order"] = self.scan_order.current()
+        self.save()
+
+    def record_scan(self):
+        key = ("slot1", "slot2", "grid", "breed")[self.calibration.current()]
+        self.record_action(key)
+
+    def record_badge(self):
+        index = self.badge.current() - 1
+        rarity, stars = (0, 0) if index < 0 else (index // 5 + 1, index % 5 + 1)
+
+        def store(step):
+            self.data.setdefault("badges", {})[f"{rarity},{stars}"] = step[2]
             self.save()
-            self.status.set("수조 레벨업 버튼 등록 완료")
-        self.record(set_upgrade)
+            self.status.set(f"{RARITIES[rarity]} {stars}성 후보 등록 완료")
+
+        self.record(store, 42, 24)
+
+    def candidate(self, grid):
+        origin_x, origin_y, _ = grid
+        samples = {base64.b64decode(value): tuple(map(int, key.split(",")))
+                   for key, value in self.data.get("badges", {}).items()}
+        found = []
+        for row in range(4):
+            for column in range(3):
+                x, y = origin_x + 92 * column, origin_y + 92 * row
+                if not game_at(x, y):
+                    continue
+                rating = match_badge(capture(x, y + 27, 52, 34), samples)
+                if rating:
+                    found.append((*rating, x, y))
+        if not found:
+            return None
+        order = self.data.get("scan_order", 0)
+        rank = (lambda row: (row[0], row[1])) if order < 2 else (lambda row: (row[1], row[0]))
+        _, _, x, y = sorted(found, key=rank, reverse=order % 2 == 0)[0]
+        return [x, y, base64.b64encode(capture(x, y)).decode("ascii")]
+
+    def scan_step(self, state, now):
+        phase = self.dynamic
+        template = None
+        if phase in ("parent1", "parent2"):
+            template = self.candidate(self.data["grid"])
+        elif phase == "slot2":
+            template = self.data["slot2"]
+        elif phase == "confirm":
+            template = self.data["breed"]
+        if template and click(template):
+            self.last_action = now
+            self.deadline = now + 5
+            self.dynamic = {"parent1": "slot2", "slot2": "parent2",
+                            "parent2": "confirm", "confirm": None}[phase]
+            if phase == "confirm":
+                self.waiting = ("breed", state)
+                self.deadline = now + 15
+        elif now > self.deadline:
+            self.stop("일치하는 후보 또는 교배 버튼을 찾지 못해 중지했습니다.")
+
+    def record_upgrade(self):
+        self.record_action("upgrade")
+
+    def record_action(self, name):
+        def store(step):
+            self.data[name] = step
+            self.save()
+            self.status.set("화면 버튼 등록 완료")
+        self.record(store)
 
     def tick(self):
         try:
+            self.sync()
             self.automate()
-        except (OSError, ValueError) as error:
+        except (OSError, ValueError, KeyError, TypeError) as error:
             self.stop(f"자동화 중지 · {error}")
         finally:
             self.root.after(200, self.tick)
@@ -293,24 +446,70 @@ class Helper:
         if U.GetAsyncKeyState(0x77) & 0x8000:
             self.stop("F8 · 자동화 꺼짐")
             return
+        state = self.synced_state
+        if state is None:
+            self.status.set("게임 저장 데이터 대기 중")
+            return
         now = time.monotonic()
         if now - self.last_action < 0.8:
             return
+        if self.waiting:
+            action, previous_state = self.waiting
+            if action == "upgrade":
+                complete = state["tankLevel"] > previous_state["tankLevel"]
+            else:
+                complete = (state["breedCount"] < previous_state["breedCount"]
+                            or len(state["fishList"]) > len(previous_state["fishList"]))
+            if complete:
+                dismiss = self.data.get("dismiss")
+                if action == "breed" and dismiss:
+                    if click(dismiss):
+                        self.last_action = now
+                    else:
+                        slot = self.data.get("slot1")
+                        if now <= self.deadline and (not slot or not matches(slot)):
+                            return
+                self.waiting = None
+                self.status.set("게임 저장에서 완료 확인 · 다음 조건 대기")
+            elif now > self.deadline:
+                self.stop("게임 저장에서 처리 결과를 확인하지 못해 중지했습니다.")
+            return
+        if self.dynamic:
+            if state["breedCount"] <= 0:
+                self.stop("교배 가능 횟수가 없어 중지했습니다.")
+                return
+            self.scan_step(state, now)
+            return
         if self.pending:
+            if not self.running[0].get() or state["breedCount"] <= 0:
+                self.stop("교배 가능 횟수가 없어 중지했습니다.")
+                return
             if click(self.pending[0]):
                 self.pending.pop(0)
                 self.last_action = now
                 self.deadline = now + 4
                 if not self.pending:
-                    self.stop("교배 입력 완료 · 결과 확인 후 다시 켜세요.")
+                    self.waiting = ("breed", state)
+                    self.deadline = now + 15
             elif now > self.deadline:
-                self.stop("예상한 게임 화면이 표시되지 않아 자동화를 중지했습니다.")
+                self.stop("예상한 교배 화면이 표시되지 않아 중지했습니다.")
             return
         upgrade = self.data.get("upgrade")
-        if self.running[1].get() and upgrade and click(upgrade):
-            self.stop("수조 레벨업 입력 완료 · 결과 확인 후 다시 켜세요.")
+        if self.running[1].get() and upgrade and self.game.can_upgrade(state):
+            if click(upgrade):
+                self.waiting = ("upgrade", state)
+                self.last_action = now
+                self.deadline = now + 15
+            else:
+                self.open_tab("tank_tab", now)
             return
-        if self.running[0].get():
+        if self.running[0].get() and state["breedCount"] > 0:
+            if all(self.data.get(key) for key in ("slot1", "slot2", "grid", "breed", "badges")):
+                if click(self.data["slot1"]):
+                    self.dynamic = "parent1"
+                    self.last_action = now
+                    self.deadline = now + 5
+                    return
             for route in self.routes:
                 first, *remaining = route["steps"]
                 if click(first):
@@ -318,8 +517,19 @@ class Helper:
                     self.last_action = now
                     self.deadline = now + 4
                     return
+            self.open_tab("breed_tab", now)
+
+    def open_tab(self, name, now):
+        template = self.data.get(name)
+        if template and click(template):
+            self.last_action = now
+        else:
+            self.status.set("등록된 게임 화면 대기 중")
 
     def save_fish(self):
+        if self.mergeable is not None:
+            self.sync_status.set("게임 동기화 중 · 수량은 게임에서 읽습니다.")
+            return
         name = self.name.get().strip()
         try:
             stars, amount = int(self.stars.get()), int(self.amount.get())
@@ -343,17 +553,22 @@ class Helper:
         choice = self.inventory.curselection()
         if not choice:
             return
-        name, rarity, stars, amount = self.fish[choice[0]]
+        name, rarity, stars, amount = self.fish[self.inventory_rows[choice[0]]]
         self.name.delete(0, tk.END)
         self.name.insert(0, name)
         self.rarity.current(rarity)
-        self.stars.set(stars)
+        self.stars.set(stars or 1)
         self.amount.set(amount)
 
     def refresh_inventory(self):
         self.inventory.delete(0, tk.END)
-        for name, rarity, stars, amount in self.fish:
-            self.inventory.insert(tk.END, f"{name}   {RARITIES[rarity]}   {stars}성   {amount}마리")
+        self.inventory_rows = []
+        for index, (name, rarity, stars, amount) in enumerate(self.fish):
+            if self.owned_only.get() and not amount:
+                continue
+            self.inventory_rows.append(index)
+            grade = f"{stars}성" if stars else "별 등급 없음"
+            self.inventory.insert(tk.END, f"{name}   {RARITIES[rarity]}   {grade}   {amount}마리")
         self.refresh_merge()
 
     def refresh_merge(self):
@@ -361,11 +576,25 @@ class Helper:
         self.visible = []
         rarities, stars_filter = self.filters
         for i, (name, rarity, stars, amount) in enumerate(self.fish):
-            if amount and rarities[rarity].get() and stars_filter[stars - 1].get():
+            if amount and rarities[rarity].get() and (stars == 0 or stars_filter[stars - 1].get()):
                 self.visible.append(i)
                 note = " · 합성 불가" if rarity == 0 else ""
                 self.candidates.insert(tk.END, f"{name} · {RARITIES[rarity]} · {stars}성 · {amount}마리{note}")
         self.show_result()
+
+    def show_recipe(self):
+        selected = self.season.current() - 1
+        if selected < 0 or not self.game:
+            self.recipe_summary.set("")
+            return
+        key = sorted(self.game.recipes)[selected]
+        inventory = self.mergeable or {}
+        items = []
+        for (name, stars), need in self.game.recipes[key].items():
+            have = sum(qty for (fish, _, grade), qty in inventory.items()
+                       if fish == name and grade == stars)
+            items.append(f"{name} {stars}성 {have}/{need} (부족 {max(0, need - have)})")
+        self.recipe_summary.set(" · ".join(items))
 
     def clear_materials(self):
         self.materials.clear()
@@ -376,7 +605,9 @@ class Helper:
         if not choice:
             return
         i = self.visible[choice[0]]
-        name, rarity, _, available = self.fish[i]
+        name, rarity, stars, available = self.fish[i]
+        if self.mergeable is not None:
+            available = self.mergeable.get((name, rarity, stars), 0)
         try:
             quantity = int(self.quantity.get())
             if (not rarity or quantity <= 0 or self.materials.get(i, 0) + quantity > available
@@ -404,6 +635,10 @@ if __name__ == "__main__":
         assert merge_distribution([2] * 7 + [3] * 3) == [(3, 70), (4, 30)]
         assert merge_distribution([5] * 10) == [(5, 100)]
         assert merge_distribution([1] * 10) == [(2, 100)]
+        scan = bytes((index * 31 + index // 20) % 256 for index in range(52 * 34 * 4))
+        patch = b"".join(scan[i:i + 168] for i in range(420, 420 + 208 * 24, 208))
+        assert match_badge(scan, {patch: (4, 2)}) == (4, 2)
+        assert match_badge(scan, {bytes(42 * 24 * 4): (4, 2)}) is None
         print("OK")
     else:
         try:
