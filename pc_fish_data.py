@@ -1,6 +1,5 @@
 """Read the local PC FISH catalog and save without changing either file."""
 import ctypes as c
-from datetime import datetime, timezone
 import hashlib
 import json
 import re
@@ -131,18 +130,12 @@ class GameData:
         state = self.state()
         rows = {(self.names.get(species, species), rarity, stars): 0
                 for species, rarity, stars in self.variants.values()}
-        mergeable = {}
-        now = datetime.now(timezone.utc)
+        remaining = {}
         for fish in state["fishList"]:
             species, rarity, stars = self.variants.get(
                 fish["Fish"], (fish["Type"], fish["Level"], fish["Grade"]))
             row = self.names.get(species, species), rarity, stars
             rows[row] = rows.get(row, 0) + 1
-            cooldown = fish.get("BreedNextDatetime")
-            until = datetime.fromisoformat(cooldown) if cooldown else None
-            if until and until.tzinfo is None:
-                until = until.replace(tzinfo=timezone.utc)
-            ready = until is None or until <= now
-            if rarity and not fish["IsLocked"] and ready:
-                mergeable[row] = mergeable.get(row, 0) + 1
-        return [list(row) + [amount] for row, amount in sorted(rows.items())], mergeable
+            left = max(0, fish.get("BreedCount", 0))
+            remaining[row] = remaining.get(row, 0) + left
+        return [list(row) + [amount] for row, amount in sorted(rows.items())], remaining
