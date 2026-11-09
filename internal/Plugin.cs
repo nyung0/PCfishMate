@@ -23,6 +23,8 @@ public sealed class Plugin : BasePlugin
     private DateTime configStamp;
     private int heartsBefore, fishBefore;
     private bool waiting;
+    private readonly HashSet<string> fishIdsBefore = new();
+    private string?[] parentVariants = Array.Empty<string?>();
     private string message = "게임 연결됨 · 대기 중";
     private string? bridgeRun, blockedRun;
     private readonly string bridge = Path.Combine(
@@ -99,7 +101,7 @@ public sealed class Plugin : BasePlugin
             plugin.blockedRun = plugin.bridgeRun;
             plugin.bridgeEnabled = false;
         }
-        if (!plugin.enabled.Value && !plugin.bridgeEnabled)
+        if (!plugin.enabled.Value && !plugin.bridgeEnabled && !plugin.waiting)
             return;
         try
         {
@@ -111,6 +113,7 @@ public sealed class Plugin : BasePlugin
             plugin.blockedRun = plugin.bridgeRun;
             plugin.bridgeEnabled = false;
             plugin.message = error.GetBaseException().Message;
+            plugin.waiting = false;
             plugin.Log.LogError($"Breeding stopped: {error.GetBaseException().Message}");
         }
     }
@@ -164,17 +167,25 @@ public sealed class Plugin : BasePlugin
 
         if (waiting)
         {
+            var added = Enumerable.Range(0, count).Select(i => Item(fish, i))
+                .Where(item => item is not null && Read(item, "Id") is string id && !fishIdsBefore.Contains(id))
+                .Take(2).ToArray();
             if (hearts >= heartsBefore && count <= fishBefore)
             {
                 if (now >= waitUntil)
                     throw new InvalidOperationException("The game did not confirm the previous breeding call.");
                 return;
             }
+            string? child = null;
             if (breed is not null && Active(breed))
             {
                 var result = Read(breed, "uiFishResult");
                 if (result is not null && Active(result))
+                {
+                    if (Read(result, "fish") is object resultFish)
+                        child = Read(resultFish, "Fish") as string;
                     Call(result, "Confirm");
+                }
                 else if (Read(breed, "viewResultFx") is object effect && Read(effect, "activeInHierarchy") is true)
                 {
                     if (now >= waitUntil)
@@ -182,10 +193,17 @@ public sealed class Plugin : BasePlugin
                     return;
                 }
             }
+            if (child is null && added.Length == 0 && now < waitUntil)
+                return;
+            if (child is null && added.Length == 1)
+                child = Read(added[0]!, "Fish") as string;
             waiting = false;
             message = "게임에서 교배 완료 확인";
             Log.LogInfo("The game confirmed breeding.");
+            Log.LogInfo("BREED_RESULT " + JsonSerializer.Serialize(new { Parents = parentVariants, Child = child }));
         }
+        if (!enabled.Value && !bridgeEnabled)
+            return;
         if (hearts <= 0)
         {
             message = "하트 회복 대기 중";
@@ -236,6 +254,18 @@ public sealed class Plugin : BasePlugin
             throw new InvalidOperationException("The game did not retain the selected parent IDs.");
         heartsBefore = hearts;
         fishBefore = count;
+        fishIdsBefore.Clear();
+        var variants = new Dictionary<string, string?>();
+        for (int i = 0; i < count; i++)
+        {
+            if (Item(fish, i) is object item && Read(item, "Id") is string id)
+            {
+                fishIdsBefore.Add(id);
+                if (parents.Any(parent => parent.Id == id))
+                    variants[id] = Read(item, "Fish") as string;
+            }
+        }
+        parentVariants = parents.Select(parent => variants.GetValueOrDefault(parent.Id)).ToArray();
         waiting = true;
         waitUntil = now + 20;
         nextBreed = now + Interval;

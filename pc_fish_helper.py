@@ -11,7 +11,7 @@ from tkinter import ttk
 
 from pc_fish_data import GameData
 
-RARITIES = ("기본", "일반", "고급", "희귀", "전설", "신화")
+from ocean_ui import CardGrid, OCEAN, PANEL, RARITIES, TEXT, ocean_style
 DATA = Path(os.environ.get("LOCALAPPDATA", ".")) / "PCFishHelper" / "settings.json"
 U = C.WinDLL("user32")
 G = C.WinDLL("gdi32")
@@ -180,105 +180,8 @@ def has_merge_lock(frame):
                for i in range(0, len(frame), 4)) >= 20
 
 
-OCEAN = "#071d33"
-PANEL = "#0d2a46"
-TEXT = "#e7f7ff"
-MUTED = "#a2bed2"
-ACCENT = "#63e5da"
-RARITY_COLORS = ("#a2bed2", "#d9f1ff", "#78e3a3", "#80c7ff", "#ffcf72", "#e6aaff")
 SPRITES = Path(__file__).resolve().parent / "fish_sprites"
 BREED_REFERENCE = SPRITES.with_name("breed_reference.json")
-
-
-def ocean_style(root):
-    root.configure(bg=OCEAN)
-    style = ttk.Style(root)
-    style.theme_use("clam")
-    style.configure(".", background=OCEAN, foreground=TEXT, font=("Malgun Gothic", 10))
-    style.configure("TButton", background=PANEL, bordercolor="#245274", padding=(7, 4))
-    style.configure("TCombobox", fieldbackground=PANEL, background=PANEL,
-                    selectbackground=PANEL, selectforeground=TEXT, padding=4)
-    style.map("TCombobox", fieldbackground=[("readonly", PANEL)],
-              foreground=[("readonly", TEXT)])
-    style.configure("TNotebook", borderwidth=0)
-    style.configure("TNotebook.Tab", background=PANEL, padding=(18, 8))
-    style.map("TNotebook.Tab", background=[("selected", "#155273")],
-              foreground=[("selected", ACCENT)])
-    style.map("TButton", background=[("active", "#155273")])
-    style.map("TCheckbutton", background=[("active", OCEAN)])
-    empty = tk.PhotoImage(master=root, width=16, height=16)
-    empty.put("#5893ac", to=(1, 1, 15, 15))
-    empty.put(PANEL, to=(2, 2, 14, 14))
-    checked = empty.copy()
-    checked.put(ACCENT, to=(2, 2, 14, 14))
-    for x, y in ((4, 8), (5, 9), (6, 10), (7, 9), (8, 8), (9, 7), (10, 6), (11, 5)):
-        checked.put(OCEAN, to=(x, y, x + 1, y + 2))
-    root.check_images = (empty, checked)
-    style.element_create("Ocean.indicator", "image", empty, ("selected", checked))
-    style.layout("Ocean.TCheckbutton", [("Checkbutton.padding", {"sticky": "nswe", "children": [
-        ("Ocean.indicator", {"side": "left", "sticky": ""}),
-        ("Checkbutton.label", {"side": "left", "sticky": "w"}),
-    ]})])
-
-
-class CardGrid(ttk.Frame):
-    def __init__(self, parent, select_card=None):
-        super().__init__(parent)
-        self.cards = []
-        self.canvas = tk.Canvas(self, background=OCEAN, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
-        self.canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side="right", fill="y")
-        self.canvas.pack(side="left", fill="both", expand=True)
-        self.canvas.bind("<Configure>", lambda _event: self.draw())
-        self.canvas.bind("<MouseWheel>", self.wheel)
-        if select_card:
-            self.canvas.bind("<Button-1>", lambda event: self.select(event, select_card))
-
-    def select(self, event, callback):
-        width = max(156, self.canvas.winfo_width())
-        columns = max(1, width // 156)
-        x, y = event.x, self.canvas.canvasy(event.y)
-        step = width / columns
-        column, row = int(x // step), int(y // 122)
-        index = row * columns + column
-        if (0 <= column < columns and 0 <= index < len(self.cards)
-                and 4 <= x % step <= step - 4 and 4 <= y % 122 <= 116):
-            callback(self.cards[index])
-
-    def wheel(self, event):
-        self.canvas.yview_scroll(-int(event.delta / 120), "units")
-
-    def set_cards(self, cards, reset=True):
-        self.cards = cards
-        self.draw()
-        if reset:
-            self.canvas.yview_moveto(0)
-
-    def draw(self):
-        canvas = self.canvas
-        canvas.delete("all")
-        width = max(156, canvas.winfo_width())
-        columns = max(1, width // 156)
-        step = width / columns
-        for i, (name, rarity, stars, detail, picture, owned) in enumerate(self.cards):
-            row, column = divmod(i, columns)
-            x, y = column * step + 4, row * 122 + 4
-            center = x + (step - 8) / 2
-            canvas.create_rectangle(x, y, x + step - 8, y + 112,
-                                    fill=PANEL, outline="#3b86a4" if owned else "#234766")
-            if picture:
-                canvas.create_image(center, y + 26, image=picture)
-            canvas.create_text(center, y + 60, text=name, width=int(step - 18),
-                               fill=TEXT if owned else MUTED, font=("Malgun Gothic", 9, "bold"))
-            grade = "★" * stars if stars else "—"
-            canvas.create_text(center, y + 83, text=f"{RARITIES[rarity]}  {grade}",
-                               fill=RARITY_COLORS[rarity] if owned else MUTED,
-                               font=("Malgun Gothic", 9))
-            canvas.create_text(center, y + 101, text=detail, fill=ACCENT if owned else MUTED,
-                               font=("Malgun Gothic", 9))
-        rows = (len(self.cards) + columns - 1) // columns
-        canvas.configure(scrollregion=(0, 0, width, rows * 122))
 
 
 def catalog_key(row, mode, remaining):

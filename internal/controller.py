@@ -13,10 +13,11 @@ import winreg
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from uuid import uuid4
+from ocean_ui import PANEL, RARITIES, TEXT, WATER, ocean_style
+from season_tab import GameData, SeasonTab, load_season_art
 
 
 BRIDGE = Path(os.environ["LOCALAPPDATA"]) / "PCFishHelper" / "internal"
-RARITIES = ("기본", "일반", "고급", "희귀", "전설", "신화")
 DEFAULT_GAME = Path(r"C:\Program Files (x86)\Steam\steamapps\common\PC FISH")
 ASSETS = Path(__file__).resolve().parent
 LOADER_FILES = ("BepInEx", "dotnet", ".doorstop_version", "doorstop_config.ini", "winhttp.dll")
@@ -108,16 +109,24 @@ class Controller:
         self.root = root
         self.command = None
         self.run_id = uuid4().hex
-        root.title("PC FISH · 내부 자동 교배")
-        root.geometry("760x520")
+        root.title("PC FISH · 바다 도감")
+        root.geometry("820x600")
         root.minsize(670, 410)
         root.protocol("WM_DELETE_WINDOW", self.close)
-        panel = ttk.Frame(root, padding=20)
-        panel.pack(fill="both", expand=True)
-        ttk.Label(panel, text="게임 내부 자동 교배", font=("Malgun Gothic", 15, "bold")).pack(anchor="w")
+        ocean_style(root)
+        header = tk.Label(root, text="PC FISH  /  바다 도감", bg=WATER, fg=TEXT,
+                          font=("Malgun Gothic", 17, "bold"), anchor="w", padx=20, pady=12)
+        header.pack(fill="x")
+        self.game_path = tk.StringVar(value=str(find_game()))
+        tabs = ttk.Notebook(root)
+        tabs.pack(fill="both", expand=True, padx=12, pady=12)
+        panel = ttk.Frame(tabs, padding=16)
+        tabs.add(panel, text="자동화")
+        season = SeasonTab(tabs, self.game_path)
+        tabs.add(season, text="합성")
+        tabs.bind("<<NotebookTabChanged>>", lambda _: season.refresh())
         install = ttk.Frame(panel)
         install.pack(fill="x", pady=(10, 0))
-        self.game_path = tk.StringVar(value=str(find_game()))
         ttk.Entry(install, textvariable=self.game_path).pack(side="left", fill="x", expand=True)
         ttk.Button(install, text="폴더 선택", command=self.pick_game).pack(side="left", padx=5)
         ttk.Button(install, text="모듈 설치", command=self.install).pack(side="left")
@@ -131,7 +140,8 @@ class Controller:
         grades.pack(anchor="w")
         self.flags = [tk.BooleanVar(value=True) for _ in RARITIES]
         for grade, flag in zip(RARITIES, self.flags):
-            ttk.Checkbutton(grades, text=grade, variable=flag).pack(side="left", padx=(0, 8))
+            ttk.Checkbutton(grades, text=grade, variable=flag,
+                            style="Ocean.TCheckbutton").pack(side="left", padx=(0, 8))
         controls = ttk.Frame(panel)
         controls.pack(anchor="w", pady=10)
         self.interval = tk.StringVar(value="10")
@@ -140,17 +150,55 @@ class Controller:
         self.start_button = ttk.Button(controls, text="자동화 시작", command=self.start)
         self.start_button.pack(side="left", padx=4)
         ttk.Button(controls, text="중지", command=self.stop).pack(side="left")
-        ttk.Label(panel, text="자동화 로그").pack(anchor="w", pady=(6, 4))
-        logs = ttk.Frame(panel)
+        ttk.Button(controls, text="로그 보기", command=self.open_log).pack(side="left", padx=6)
+        ttk.Label(panel, text="교배 결과").pack(anchor="w", pady=(6, 4))
+        self.history = ttk.Treeview(panel, columns=("parent1", "parent2", "child"), show="headings")
+        for column, label in zip(("parent1", "parent2", "child"), ("부모 1", "부모 2", "태어난 물고기")):
+            self.history.heading(column, text=label)
+            self.history.column(column, width=180, anchor="center")
+        self.history.pack(fill="both", expand=True)
+        self.log_window = None
+        self.last_log = ""
+        self.last_history = ()
+        self.catalog_path = None
+        self.catalog = None
+        self.tick()
+
+    def open_log(self):
+        if self.log_window is not None and self.log_window.winfo_exists():
+            self.log_window.lift()
+            return
+        self.log_window = tk.Toplevel(self.root)
+        self.log_window.title("PC FISH · 자동화 로그")
+        self.log_window.geometry("740x420")
+        logs = ttk.Frame(self.log_window, padding=12)
         logs.pack(fill="both", expand=True)
         self.log = tk.Text(logs, height=12, wrap="word", state="disabled",
-                           background="#0d2a46", foreground="#e7f7ff", relief="flat")
+                           background=PANEL, foreground=TEXT, relief="flat")
         scrollbar = ttk.Scrollbar(logs, command=self.log.yview)
         self.log.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side="right", fill="y")
         self.log.pack(side="left", fill="both", expand=True)
-        self.last_log = ""
-        self.tick()
+        self.show_log(self.last_log)
+
+    def show_log(self, text):
+        if self.log_window is None or not self.log_window.winfo_exists():
+            return
+        self.log.configure(state="normal")
+        self.log.delete("1.0", "end")
+        self.log.insert("end", text)
+        self.log.see("end")
+        self.log.configure(state="disabled")
+
+    def fish_label(self, variant):
+        if not variant:
+            return "확인되지 않음"
+        if self.catalog and variant in self.catalog.variants:
+            species, rarity, stars = self.catalog.variants[variant]
+            name = self.catalog.names.get(species, species)
+            grade = f" · {stars}성" if stars else ""
+            return f"{name} · {RARITIES[rarity]}{grade}"
+        return variant
 
     def pick_game(self):
         path = filedialog.askdirectory(initialdir=self.game_path.get())
@@ -178,14 +226,31 @@ class Controller:
                       or line.startswith(("[Error", "[Fatal"))]
             text = "\n".join(useful[-100:])
         except OSError:
+            useful = []
             text = ""
         if text != self.last_log:
             self.last_log = text
-            self.log.configure(state="normal")
-            self.log.delete("1.0", "end")
-            self.log.insert("end", text)
-            self.log.see("end")
-            self.log.configure(state="disabled")
+            self.show_log(text)
+        records = tuple(line.split("BREED_RESULT ", 1)[1] for line in useful if "BREED_RESULT " in line)
+        if records == self.last_history and game == self.catalog_path:
+            return
+        self.last_history = records
+        if game != self.catalog_path:
+            self.catalog_path, self.catalog = game, None
+        if records and self.catalog is None:
+            try:
+                self.catalog = GameData(install=game)
+            except (OSError, ValueError):
+                pass
+        self.history.delete(*self.history.get_children())
+        for record in reversed(records):
+            try:
+                result = json.loads(record)
+                first, second = result["Parents"]
+                values = tuple(map(self.fish_label, (first, second, result["Child"])))
+            except (KeyError, TypeError, ValueError):
+                continue
+            self.history.insert("", "end", values=values)
 
     def write(self, command):
         BRIDGE.mkdir(parents=True, exist_ok=True)
@@ -240,6 +305,20 @@ class Controller:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "--check-season":
+        report = Path(sys.argv[2])
+        try:
+            game_path = find_game()
+            game = GameData(install=game_path)
+            rows, _ = game.rows()
+            variants, images = load_season_art(game, game_path)
+            result = {"recipes": len(game.recipes), "owned": sum(row[3] for row in rows),
+                      "variants": len(variants), "images": len(images)}
+        except Exception as error:
+            report.write_text(str(error), encoding="utf-8")
+            raise SystemExit(1)
+        report.write_text(json.dumps(result), encoding="utf-8")
+        raise SystemExit(0)
     root = tk.Tk()
     if len(sys.argv) == 3 and sys.argv[1] == "--install-module":
         root.withdraw()
