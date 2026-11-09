@@ -13,6 +13,7 @@ import winreg
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from uuid import uuid4
+from ctypes import wintypes
 from ocean_ui import PANEL, RARITIES, TEXT, WATER, ocean_style
 from season_tab import GameData, SeasonTab, load_season_art
 
@@ -21,6 +22,34 @@ BRIDGE = Path(os.environ["LOCALAPPDATA"]) / "PCFishHelper" / "internal"
 DEFAULT_GAME = Path(r"C:\Program Files (x86)\Steam\steamapps\common\PC FISH")
 ASSETS = Path(__file__).resolve().parent
 LOADER_FILES = ("BepInEx", "dotnet", ".doorstop_version", "doorstop_config.ini", "winhttp.dll")
+
+
+def set_taskbar_icon(root, icon):
+    user32 = ctypes.windll.user32
+    user32.GetAncestor.argtypes = (wintypes.HWND, wintypes.UINT)
+    user32.GetAncestor.restype = wintypes.HWND
+    user32.LoadImageW.argtypes = (wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT,
+                                  ctypes.c_int, ctypes.c_int, wintypes.UINT)
+    user32.LoadImageW.restype = wintypes.HANDLE
+    user32.SendMessageW.argtypes = (wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+    user32.SendMessageW.restype = wintypes.LPARAM
+    window = user32.GetAncestor(root.winfo_id(), 2)
+    if not window:
+        return
+    user32.MonitorFromWindow.argtypes = (wintypes.HWND, wintypes.DWORD)
+    user32.MonitorFromWindow.restype = wintypes.HANDLE
+    scale = ctypes.c_int()
+    monitor = user32.MonitorFromWindow(window, 2)
+    if ctypes.windll.shcore.GetScaleFactorForMonitor(ctypes.c_void_p(monitor), ctypes.byref(scale)) == 0:
+        dpi = round(96 * scale.value / 100)
+    else:
+        dpi = user32.GetDpiForWindow(window) or 96
+    for kind, width, height in ((0, 49, 50), (1, 11, 12)):
+        handle = user32.LoadImageW(None, str(icon), 1,
+                                   user32.GetSystemMetricsForDpi(width, dpi),
+                                   user32.GetSystemMetricsForDpi(height, dpi), 0x0010)
+        if handle:
+            user32.SendMessageW(window, 0x0080, kind, handle)
 
 
 def find_game():
@@ -110,12 +139,21 @@ class Controller:
         self.command = None
         self.run_id = uuid4().hex
         root.title("PC FISH · 바다 도감")
+        icon = ASSETS / "pcfish.ico"
+        if icon.is_file():
+            root.iconbitmap(default=str(icon))
+            root.bind("<Map>", lambda event: root.after_idle(
+                lambda: set_taskbar_icon(root, icon)) if event.widget is root else None, add="+")
         root.geometry("820x600")
         root.minsize(670, 410)
         root.protocol("WM_DELETE_WINDOW", self.close)
         ocean_style(root)
         header = tk.Label(root, text="PC FISH  /  바다 도감", bg=WATER, fg=TEXT,
                           font=("Malgun Gothic", 17, "bold"), anchor="w", padx=20, pady=12)
+        badge = ASSETS / "pcfish-badge.png"
+        if badge.is_file():
+            self.header_icon = tk.PhotoImage(master=root, file=str(badge))
+            header.configure(image=self.header_icon, compound="left", padx=14)
         header.pack(fill="x")
         self.game_path = tk.StringVar(value=str(find_game()))
         tabs = ttk.Notebook(root)
@@ -136,12 +174,26 @@ class Controller:
         ttk.Label(panel, textvariable=self.module_status).pack(anchor="w", pady=(6, 0))
         self.status = tk.StringVar(value="게임 플러그인 연결 대기 중")
         ttk.Label(panel, textvariable=self.status, wraplength=430).pack(anchor="w", pady=8)
+        modes = ttk.Frame(panel)
+        modes.pack(anchor="w", pady=(0, 6))
+        self.breed_enabled = tk.BooleanVar(value=True)
+        self.upgrade_enabled = tk.BooleanVar(value=False)
+        for label, flag in (("교배 자동화", self.breed_enabled), ("수조 레벨업 자동화", self.upgrade_enabled)):
+            ttk.Checkbutton(modes, text=label, variable=flag,
+                            style="Ocean.TCheckbutton", command=self.update_modes).pack(side="left", padx=(0, 14))
         grades = ttk.Frame(panel)
         grades.pack(anchor="w")
         self.flags = [tk.BooleanVar(value=True) for _ in RARITIES]
         for grade, flag in zip(RARITIES, self.flags):
             ttk.Checkbutton(grades, text=grade, variable=flag,
                             style="Ocean.TCheckbutton").pack(side="left", padx=(0, 8))
+        priority = ttk.Frame(panel)
+        priority.pack(anchor="w", pady=(8, 0))
+        ttk.Label(priority, text="교배 우선순위").pack(side="left", padx=(0, 8))
+        self.priority = ttk.Combobox(priority, state="readonly", width=34,
+                                    values=("희귀도 높은 순 → 별 등급 높은 순", "별 등급 높은 순 → 희귀도 높은 순"))
+        self.priority.current(0)
+        self.priority.pack(side="left")
         controls = ttk.Frame(panel)
         controls.pack(anchor="w", pady=10)
         self.interval = tk.StringVar(value="10")
@@ -260,15 +312,20 @@ class Controller:
 
     def start(self):
         selected = [i for i, flag in enumerate(self.flags) if flag.get()]
+        breed, upgrade = self.breed_enabled.get(), self.upgrade_enabled.get()
+        if not breed and not upgrade:
+            self.status.set("실행할 자동화 기능을 하나 이상 선택하세요.")
+            return
         try:
-            interval = int(self.interval.get())
-            if not 1 <= interval <= 3600 or not selected:
+            interval = int(self.interval.get()) if breed else 10
+            if not 1 <= interval <= 3600 or (breed and not selected):
                 raise ValueError
         except ValueError:
             self.status.set("희귀도를 체크하고 1~3600초 사이의 간격을 입력하세요.")
             return
         self.run_id = uuid4().hex
-        self.command = {"RunId": self.run_id, "Enabled": True, "Interval": interval, "Rarities": selected}
+        self.command = {"RunId": self.run_id, "Enabled": True, "Interval": interval, "Rarities": selected,
+                        "Breed": breed, "TankUpgrade": upgrade, "StarsFirst": self.priority.current() == 1}
         self.tick_status()
 
     def stop(self):
@@ -277,6 +334,16 @@ class Controller:
             self.write({"RunId": self.run_id, "Enabled": False, "Interval": 10, "Rarities": []})
         except OSError as error:
             self.status.set(f"중지 요청 전달 실패 · {error}")
+
+    def update_modes(self):
+        if self.command is None:
+            return
+        breed, upgrade = self.breed_enabled.get(), self.upgrade_enabled.get()
+        if not breed and not upgrade:
+            self.stop()
+            return
+        self.command.update(Breed=breed, TankUpgrade=upgrade)
+        self.tick_status()
 
     def close(self):
         self.stop()
@@ -319,6 +386,7 @@ if __name__ == "__main__":
             raise SystemExit(1)
         report.write_text(json.dumps(result), encoding="utf-8")
         raise SystemExit(0)
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("PCFish.Automation.Pink")
     root = tk.Tk()
     if len(sys.argv) == 3 and sys.argv[1] == "--install-module":
         root.withdraw()

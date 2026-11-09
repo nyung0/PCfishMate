@@ -13,7 +13,7 @@ public sealed class Plugin : BasePlugin
 {
     private const BindingFlags Members = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
     private static Plugin instance = null!;
-    private static object? data, ui, breed;
+    private static object? data, ui, breed, home;
     private readonly Stopwatch clock = Stopwatch.StartNew();
     private ConfigEntry<bool> enabled = null!;
     private ConfigEntry<int> interval = null!;
@@ -23,6 +23,8 @@ public sealed class Plugin : BasePlugin
     private DateTime configStamp;
     private int heartsBefore, fishBefore;
     private bool waiting;
+    private double nextUpgrade;
+    private bool upgradePopup;
     private readonly HashSet<string> fishIdsBefore = new();
     private string?[] parentVariants = Array.Empty<string?>();
     private string message = "게임 연결됨 · 대기 중";
@@ -48,6 +50,7 @@ public sealed class Plugin : BasePlugin
         {
             Hook("NN.PF.Core.Managers.GameDataManager", "Start", nameof(CaptureData)),
             Hook("NN.PF.Core.Managers.UIManager", "Start", nameof(CaptureUi)),
+            Hook("NN.PF.UI.Home.UIHome", "OnEnable", nameof(CaptureHome)),
             Hook("NN.PF.Core.Managers.GameManager", "Update", nameof(Tick)),
         };
         foreach (var (target, postfix) in hooks)
@@ -64,6 +67,7 @@ public sealed class Plugin : BasePlugin
 
     private static void CaptureData(object __instance) => data = __instance;
     private static void CaptureUi(object __instance) => ui = __instance;
+    private static void CaptureHome(object __instance) => home = __instance;
 
     private bool previousF7;
     private bool sawUpdate;
@@ -118,7 +122,8 @@ public sealed class Plugin : BasePlugin
         }
     }
 
-    private sealed record Command(string RunId, bool Enabled, int Interval, int[] Rarities);
+    private sealed record Command(string RunId, bool Enabled, int Interval, int[] Rarities,
+        bool? Breed, bool TankUpgrade, bool StarsFirst);
     private Command? command;
 
     private void PollBridge()
@@ -130,6 +135,8 @@ public sealed class Plugin : BasePlugin
             command = DateTime.UtcNow - File.GetLastWriteTimeUtc(path) < TimeSpan.FromSeconds(5)
                 ? JsonSerializer.Deserialize<Command>(File.ReadAllText(path))
                 : null;
+            if (command?.Enabled == false && enabled.Value)
+                enabled.Value = false;
             bridgeRun = command?.RunId;
             bool requested = command is { Enabled: true } && bridgeRun != blockedRun;
             if (requested != bridgeEnabled)
@@ -204,6 +211,10 @@ public sealed class Plugin : BasePlugin
         }
         if (!enabled.Value && !bridgeEnabled)
             return;
+        if (TryUpgrade(now))
+            return;
+        if (bridgeEnabled && command?.Breed == false)
+            return;
         if (hearts <= 0)
         {
             message = "하트 회복 대기 중";
@@ -274,6 +285,43 @@ public sealed class Plugin : BasePlugin
         Call(breed, "Breed");
     }
 
+    private bool TryUpgrade(double now)
+    {
+        if (upgradePopup)
+        {
+            if (now < nextUpgrade)
+                return true;
+            upgradePopup = false;
+            if (home is not null && Read(home, "uiLevelUp") is object popup && Active(popup))
+                Call(popup, "Ok");
+            return true;
+        }
+        if (!bridgeEnabled || command?.TankUpgrade != true || now < nextUpgrade
+            || data is null || Call(data, "IsCheckTankLevelUp") is not true)
+            return false;
+        if (ui is null || Read(ui, "isProcessing") is not false)
+            return true;
+        if (home is null || !Active(home))
+        {
+            nextUpgrade = now + 1;
+            if (Read(ui, "viewWindow") is object window && Read(window, "activeInHierarchy") is false)
+                Call(ui, "OpenWindow");
+            Call(ui, "ChangeTabMenu", 0);
+            return true;
+        }
+        int previous = (int)Read(data, "tankLevel")!;
+        Call(home, "TankLevelUp");
+        int current = (int)Read(data, "tankLevel")!;
+        nextUpgrade = now + 3;
+        upgradePopup = current > previous;
+        if (upgradePopup)
+        {
+            message = $"수조 레벨업 · Lv.{previous} → Lv.{current}";
+            Log.LogInfo(message);
+        }
+        return true;
+    }
+
     private IEnumerable<(string Id, int Rarity, int Stars)> Candidates(object fish, int count)
     {
         var allowed = bridgeEnabled && command is not null
@@ -299,8 +347,10 @@ public sealed class Plugin : BasePlugin
                 continue;
             candidates.Add((id, rarity, stars));
         }
-        return candidates.OrderByDescending(item => item.Rarity).ThenByDescending(item => item.Stars)
-            .DistinctBy(item => item.Id);
+        var ordered = bridgeEnabled && command?.StarsFirst == true
+            ? candidates.OrderByDescending(item => item.Stars).ThenByDescending(item => item.Rarity)
+            : candidates.OrderByDescending(item => item.Rarity).ThenByDescending(item => item.Stars);
+        return ordered.DistinctBy(item => item.Id);
     }
 
     private static bool Active(object behaviour) =>
