@@ -1,0 +1,66 @@
+name: Release Windows installer
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/release-windows.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      RELEASE_TAG: v0.1.0
+      DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 6.0.428
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Download and verify BepInEx
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path build | Out-Null
+          Invoke-WebRequest 'https://builds.bepinex.dev/projects/bepinex_be/793/BepInEx-Unity.IL2CPP-win-x64-6.0.0-be.793%2Bdbc82f0.zip' -OutFile build/loader.zip
+          $expected = '5B63D7D0E92A2448CCD13B738FF95FF1CC1026C6D718555D4DF8E6C824953AC4'
+          if ((Get-FileHash build/loader.zip -Algorithm SHA256).Hash -ne $expected) { throw 'Unexpected BepInEx archive hash' }
+          Expand-Archive build/loader.zip build/loader
+      - name: Compile and package
+        shell: pwsh
+        run: |
+          $core = (Resolve-Path build/loader/BepInEx/core).Path
+          dotnet build internal/PCFishInternal.csproj -c Release "-p:BepInExCore=$core" -o build/plugin
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -m pip install pyinstaller==6.22.3
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -m PyInstaller --noconfirm --onefile --windowed --name PCFishAutomation --add-data 'build/loader.zip:.' --add-data 'build/plugin/PCFishInternal.dll:.' internal/controller.py
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $hash = (Get-FileHash dist/PCFishAutomation.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  PCFishAutomation.exe" | Set-Content dist/SHA256SUMS.txt -Encoding ascii
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $notes = @'
+          PC FISH 자동 교배용 Windows x64 설치 프로그램입니다.
+
+          1. PC FISH를 종료하고 PCFishAutomation.exe를 실행합니다.
+          2. 감지된 Steam 설치 폴더를 확인하고 모듈 설치를 누릅니다.
+          3. 게임 실행을 누른 뒤 연결이 표시되면 자동화 시작을 누릅니다.
+
+          BepInEx 로더와 교배 플러그인이 포함되어 있습니다. 게임은 Steam에서 별도로 설치해야 합니다.
+          BepInEx source: https://github.com/BepInEx/BepInEx/tree/dbc82f05b8ea34833de5b6a723eb60dd8398e0b1
+          '@
+          gh release create $env:RELEASE_TAG dist/PCFishAutomation.exe dist/SHA256SUMS.txt --target $env:GITHUB_SHA --title 'PC FISH Automation v0.1.0' --notes "$notes"

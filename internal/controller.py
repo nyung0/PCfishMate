@@ -9,6 +9,7 @@ import tempfile
 import time
 import tkinter as tk
 import zipfile
+import winreg
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from uuid import uuid4
@@ -19,6 +20,41 @@ RARITIES = ("기본", "일반", "고급", "희귀", "전설", "신화")
 DEFAULT_GAME = Path(r"C:\Program Files (x86)\Steam\steamapps\common\PC FISH")
 ASSETS = Path(__file__).resolve().parent
 LOADER_FILES = ("BepInEx", "dotnet", ".doorstop_version", "doorstop_config.ini", "winhttp.dll")
+
+
+def find_game():
+    roots = [DEFAULT_GAME.parents[2]]
+    for hive, key, value in (
+        (winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam", "SteamPath"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam", "InstallPath"),
+    ):
+        try:
+            with winreg.OpenKey(hive, key) as handle:
+                roots.append(Path(winreg.QueryValueEx(handle, value)[0]))
+        except OSError:
+            continue
+    libraries = list(roots)
+    for root in roots:
+        try:
+            vdf = (root / "steamapps" / "libraryfolders.vdf").read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeError):
+            continue
+        libraries.extend(Path(path.replace("\\\\", "\\")) for path in re.findall(r'"path"\s+"([^"]+)"', vdf))
+    for library in dict.fromkeys(libraries):
+        steamapps = library / "steamapps"
+        names = ["PC FISH"]
+        try:
+            manifest = (steamapps / "appmanifest_4842670.acf").read_text(encoding="utf-8-sig")
+            match = re.search(r'"installdir"\s+"([^"]+)"', manifest)
+            if match:
+                names.insert(0, match[1])
+        except (OSError, UnicodeError):
+            pass
+        for name in names:
+            game = steamapps / "common" / name
+            if (game / "PCFish.exe").is_file() and (game / "GameAssembly.dll").is_file():
+                return game
+    return DEFAULT_GAME
 
 
 def install_module(game):
@@ -81,7 +117,7 @@ class Controller:
         ttk.Label(panel, text="게임 내부 자동 교배", font=("Malgun Gothic", 15, "bold")).pack(anchor="w")
         install = ttk.Frame(panel)
         install.pack(fill="x", pady=(10, 0))
-        self.game_path = tk.StringVar(value=str(DEFAULT_GAME))
+        self.game_path = tk.StringVar(value=str(find_game()))
         ttk.Entry(install, textvariable=self.game_path).pack(side="left", fill="x", expand=True)
         ttk.Button(install, text="폴더 선택", command=self.pick_game).pack(side="left", padx=5)
         ttk.Button(install, text="모듈 설치", command=self.install).pack(side="left")
