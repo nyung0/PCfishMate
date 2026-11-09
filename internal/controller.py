@@ -13,6 +13,8 @@ import winreg
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from uuid import uuid4
+from datetime import datetime
+from hashlib import file_digest
 from ctypes import wintypes
 from ocean_ui import PANEL, RARITIES, TEXT, WATER, ocean_style
 from season_tab import GameData, SeasonTab, load_season_art
@@ -110,7 +112,13 @@ def install_module(game):
                     shutil.copy2(source, destination)
     plugins = game / "BepInEx" / "plugins"
     plugins.mkdir(exist_ok=True)
-    shutil.copy2(ASSETS / "PCFishInternal.dll", plugins)
+    target = plugins / "PCFishInternal.dll"
+    staged = plugins / f"PCFishInternal-{uuid4().hex}.tmp"
+    try:
+        shutil.copy2(ASSETS / target.name, staged)
+        staged.replace(target)
+    finally:
+        staged.unlink(missing_ok=True)
     config = game / "BepInEx" / "config" / "BepInEx.cfg"
     config.parent.mkdir(exist_ok=True)
     if config.exists():
@@ -125,16 +133,168 @@ def install_module(game):
                           encoding="utf-8")
 
 
+def ready_game(game):
+    try:
+        if not all((game / name).exists() for name in (*LOADER_FILES, "PCFish.exe", "GameAssembly.dll")):
+            return False
+        with (ASSETS / "PCFishInternal.dll").open("rb") as source, (
+                game / "BepInEx/plugins/PCFishInternal.dll").open("rb") as installed:
+            return file_digest(source, "sha256").digest() == file_digest(installed, "sha256").digest()
+    except OSError:
+        return False
+
+
+class ShellExecuteInfo(ctypes.Structure):
+    _fields_ = [
+        ("size", wintypes.DWORD), ("mask", wintypes.ULONG), ("window", wintypes.HWND),
+        ("verb", wintypes.LPCWSTR), ("file", wintypes.LPCWSTR),
+        ("params", wintypes.LPCWSTR), ("directory", wintypes.LPCWSTR),
+        ("show", ctypes.c_int), ("instance", wintypes.HINSTANCE), ("id_list", ctypes.c_void_p),
+        ("class_name", wintypes.LPCWSTR), ("class_key", wintypes.HKEY),
+        ("hotkey", wintypes.DWORD), ("icon", wintypes.HANDLE), ("process", wintypes.HANDLE),
+    ]
+
+
 def elevated_install(game):
     args = ["--install-module", str(game)]
     if not getattr(sys, "frozen", False):
         args.insert(0, str(Path(__file__).resolve()))
-    return ctypes.windll.shell32.ShellExecuteW(
-        None, "runas", sys.executable, subprocess.list2cmdline(args), None, 1)
+    info = ShellExecuteInfo(size=ctypes.sizeof(ShellExecuteInfo), mask=0x40,
+                            verb="runas", file=sys.executable,
+                            params=subprocess.list2cmdline(args), show=1)
+    launch = ctypes.windll.shell32.ShellExecuteExW
+    launch.argtypes = (ctypes.POINTER(ShellExecuteInfo),)
+    launch.restype = wintypes.BOOL
+    reset = os.environ.get("PYINSTALLER_RESET_ENVIRONMENT")
+    if getattr(sys, "frozen", False):
+        os.environ["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    try:
+        launched = launch(ctypes.byref(info))
+    finally:
+        if reset is None:
+            os.environ.pop("PYINSTALLER_RESET_ENVIRONMENT", None)
+        else:
+            os.environ["PYINSTALLER_RESET_ENVIRONMENT"] = reset
+    if not launched or not info.process:
+        raise OSError("관리자 권한 설치가 시작되지 않았습니다.")
+    return info.process
+
+
+def setup_game(root):
+    settings = BRIDGE / "setup.json"
+    try:
+        previous = Path(json.loads(settings.read_text(encoding="utf-8"))["Game"])
+    except (OSError, ValueError, KeyError, TypeError):
+        previous = None
+    if previous is not None and ready_game(previous):
+        return previous
+
+    ocean_style(root)
+    wizard = tk.Toplevel(root)
+    wizard.title("PC FISH · 초기 설정")
+    wizard.resizable(False, False)
+    icon = ASSETS / "pcfish.ico"
+    if icon.is_file():
+        wizard.iconbitmap(str(icon))
+    panel = ttk.Frame(wizard, padding=22)
+    panel.pack(fill="both", expand=True)
+    ttk.Label(panel, text="PC FISH 설치 설정", font=("Malgun Gothic", 16, "bold")).pack(anchor="w")
+    path = tk.StringVar(value=str(previous or find_game()))
+    row = ttk.Frame(panel)
+    row.pack(fill="x", pady=10)
+    ttk.Entry(row, width=53, textvariable=path).pack(side="left", fill="x", expand=True)
+
+    def pick():
+        chosen = filedialog.askdirectory(parent=wizard, initialdir=path.get())
+        if chosen:
+            path.set(chosen)
+
+    ttk.Button(row, text="폴더 선택", command=pick).pack(side="left", padx=(8, 0))
+    ttk.Label(panel, wraplength=475, text=(
+        "선택한 Steam 게임 폴더에 BepInEx 로더와 PC FISH 자동화 모듈을 설치하거나 갱신합니다. "
+        "게임을 종료한 뒤 진행해 주세요. Windows 관리자 권한이 필요할 수 있습니다."
+    )).pack(anchor="w", pady=12)
+    consent = tk.BooleanVar()
+    ttk.Checkbutton(panel, text="위 설치 내용에 동의합니다.", variable=consent,
+                    style="Ocean.TCheckbutton").pack(anchor="w")
+    status = tk.StringVar()
+    ttk.Label(panel, textvariable=status, wraplength=475).pack(anchor="w", pady=8)
+    buttons = ttk.Frame(panel)
+    buttons.pack(anchor="e")
+    result = None
+    handle = None
+
+    def cancel():
+        if handle is None:
+            wizard.destroy()
+
+    def finish(game):
+        nonlocal result
+        try:
+            settings.parent.mkdir(parents=True, exist_ok=True)
+            temporary = settings.with_name(f"setup-{uuid4().hex}.tmp")
+            temporary.write_text(json.dumps({"Game": str(game)}), encoding="utf-8")
+            temporary.replace(settings)
+        except OSError as error:
+            status.set(f"설치 설정 저장 실패 · {error}")
+            return
+        result = game
+        wizard.destroy()
+
+    def poll(game):
+        nonlocal handle
+        kernel = ctypes.windll.kernel32
+        wait = kernel.WaitForSingleObject
+        wait.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        wait.restype = wintypes.DWORD
+        code = wait(handle, 0)
+        if code == 258:
+            wizard.after(250, poll, game)
+            return
+        exit_code = wintypes.DWORD(1)
+        get_exit = kernel.GetExitCodeProcess
+        get_exit.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+        success = code == 0 and get_exit(handle, ctypes.byref(exit_code)) and exit_code.value == 0
+        kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel.CloseHandle(handle)
+        handle = None
+        install.state(["!disabled"])
+        if success and ready_game(game):
+            finish(game)
+        else:
+            status.set("설치를 완료하지 못했습니다. 게임을 종료하고 다시 시도하세요.")
+
+    def begin():
+        nonlocal handle
+        if not consent.get():
+            status.set("설치 내용을 확인하고 동의해 주세요.")
+            return
+        game = Path(path.get().strip()).resolve()
+        if not all((game / name).is_file() for name in ("PCFish.exe", "GameAssembly.dll")):
+            status.set("PCFish.exe가 있는 Steam 게임 폴더를 선택하세요.")
+            return
+        if ready_game(game):
+            finish(game)
+            return
+        try:
+            handle = elevated_install(game)
+        except OSError as error:
+            status.set(str(error))
+            return
+        install.state(["disabled"])
+        status.set("설치 완료를 기다리는 중…")
+        wizard.after(250, poll, game)
+
+    ttk.Button(buttons, text="취소", command=cancel).pack(side="left", padx=6)
+    install = ttk.Button(buttons, text="설치 및 실행", command=begin)
+    install.pack(side="left")
+    wizard.protocol("WM_DELETE_WINDOW", cancel)
+    root.wait_window(wizard)
+    return result
 
 
 class Controller:
-    def __init__(self, root):
+    def __init__(self, root, game):
         self.root = root
         self.command = None
         self.run_id = uuid4().hex
@@ -155,7 +315,7 @@ class Controller:
             self.header_icon = tk.PhotoImage(master=root, file=str(badge))
             header.configure(image=self.header_icon, compound="left", padx=14)
         header.pack(fill="x")
-        self.game_path = tk.StringVar(value=str(find_game()))
+        self.game_path = tk.StringVar(value=str(game))
         tabs = ttk.Notebook(root)
         tabs.pack(fill="both", expand=True, padx=12, pady=12)
         panel = ttk.Frame(tabs, padding=16)
@@ -165,9 +325,7 @@ class Controller:
         tabs.bind("<<NotebookTabChanged>>", lambda _: season.refresh())
         install = ttk.Frame(panel)
         install.pack(fill="x", pady=(10, 0))
-        ttk.Entry(install, textvariable=self.game_path).pack(side="left", fill="x", expand=True)
-        ttk.Button(install, text="폴더 선택", command=self.pick_game).pack(side="left", padx=5)
-        ttk.Button(install, text="모듈 설치", command=self.install).pack(side="left")
+        ttk.Label(install, textvariable=self.game_path).pack(side="left", fill="x", expand=True)
         ttk.Button(install, text="게임 실행",
                    command=lambda: os.startfile("steam://rungameid/4842670")).pack(side="left", padx=(5, 0))
         self.module_status = tk.StringVar()
@@ -181,18 +339,20 @@ class Controller:
         for label, flag in (("교배 자동화", self.breed_enabled), ("수조 레벨업 자동화", self.upgrade_enabled)):
             ttk.Checkbutton(modes, text=label, variable=flag,
                             style="Ocean.TCheckbutton", command=self.update_modes).pack(side="left", padx=(0, 14))
+        ttk.Label(panel, text="교배 허용 희귀도 · 두 부모 모두 적용").pack(anchor="w", pady=(2, 4))
         grades = ttk.Frame(panel)
         grades.pack(anchor="w")
         self.flags = [tk.BooleanVar(value=True) for _ in RARITIES]
         for grade, flag in zip(RARITIES, self.flags):
             ttk.Checkbutton(grades, text=grade, variable=flag,
-                            style="Ocean.TCheckbutton").pack(side="left", padx=(0, 8))
+                            style="Ocean.TCheckbutton", command=self.update_modes).pack(side="left", padx=(0, 8))
         priority = ttk.Frame(panel)
         priority.pack(anchor="w", pady=(8, 0))
         ttk.Label(priority, text="교배 우선순위").pack(side="left", padx=(0, 8))
         self.priority = ttk.Combobox(priority, state="readonly", width=34,
                                     values=("희귀도 높은 순 → 별 등급 높은 순", "별 등급 높은 순 → 희귀도 높은 순"))
         self.priority.current(0)
+        self.priority.bind("<<ComboboxSelected>>", lambda _: self.update_modes())
         self.priority.pack(side="left")
         controls = ttk.Frame(panel)
         controls.pack(anchor="w", pady=10)
@@ -203,12 +363,17 @@ class Controller:
         self.start_button.pack(side="left", padx=4)
         ttk.Button(controls, text="중지", command=self.stop).pack(side="left")
         ttk.Button(controls, text="로그 보기", command=self.open_log).pack(side="left", padx=6)
-        ttk.Label(panel, text="교배 결과").pack(anchor="w", pady=(6, 4))
-        self.history = ttk.Treeview(panel, columns=("parent1", "parent2", "child"), show="headings")
-        for column, label in zip(("parent1", "parent2", "child"), ("부모 1", "부모 2", "태어난 물고기")):
+        ttk.Label(panel, text="자동화 기록").pack(anchor="w", pady=(6, 4))
+        history_panel = ttk.Frame(panel)
+        history_panel.pack(fill="both", expand=True)
+        self.history = ttk.Treeview(history_panel, columns=("time", "kind", "detail"), show="headings")
+        for column, label, width in (("time", "시간", 155), ("kind", "유형", 105), ("detail", "내용", 420)):
             self.history.heading(column, text=label)
-            self.history.column(column, width=180, anchor="center")
-        self.history.pack(fill="both", expand=True)
+            self.history.column(column, width=width, anchor="w", stretch=column == "detail")
+        scrollbar = ttk.Scrollbar(history_panel, command=self.history.yview)
+        self.history.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        self.history.pack(side="left", fill="both", expand=True)
         self.log_window = None
         self.last_log = ""
         self.last_history = ()
@@ -252,19 +417,6 @@ class Controller:
             return f"{name} · {RARITIES[rarity]}{grade}"
         return variant
 
-    def pick_game(self):
-        path = filedialog.askdirectory(initialdir=self.game_path.get())
-        if path:
-            self.game_path.set(path)
-
-    def install(self):
-        game = Path(self.game_path.get())
-        if not (game / "PCFish.exe").is_file():
-            messagebox.showerror("모듈 설치", "PCFish.exe가 있는 폴더를 선택하세요.")
-            return
-        if elevated_install(game) <= 32:
-            messagebox.showerror("모듈 설치", "관리자 권한 설치를 시작하지 못했습니다.")
-
     def refresh_log(self):
         game = Path(self.game_path.get())
         dll = game / "BepInEx" / "plugins" / "PCFishInternal.dll"
@@ -283,7 +435,13 @@ class Controller:
         if text != self.last_log:
             self.last_log = text
             self.show_log(text)
-        records = tuple(line.split("BREED_RESULT ", 1)[1] for line in useful if "BREED_RESULT " in line)
+        event_path = BRIDGE / "events.jsonl"
+        try:
+            with event_path.open("rb") as stream:
+                stream.seek(max(0, event_path.stat().st_size - 96_000))
+                records = tuple(stream.read().decode("utf-8", errors="replace").splitlines()[-250:])
+        except OSError:
+            records = ()
         if records == self.last_history and game == self.catalog_path:
             return
         self.last_history = records
@@ -295,14 +453,20 @@ class Controller:
             except (OSError, ValueError):
                 pass
         self.history.delete(*self.history.get_children())
-        for record in reversed(records):
+        for line in reversed(records):
             try:
-                result = json.loads(record)
-                first, second = result["Parents"]
-                values = tuple(map(self.fish_label, (first, second, result["Child"])))
+                event = json.loads(line)
+                stamp = datetime.fromisoformat(event["Time"]).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+                kind, detail = event["Kind"], event["Message"]
+                if kind in ("교배 요청", "교배 완료"):
+                    first, second = map(self.fish_label, event["Parents"])
+                    if kind == "교배 완료":
+                        detail = f"{first} + {second} → {self.fish_label(event['Child'])}"
+                    else:
+                        detail = f"{first} + {second} · {detail}"
             except (KeyError, TypeError, ValueError):
                 continue
-            self.history.insert("", "end", values=values)
+            self.history.insert("", "end", values=(stamp, kind, detail))
 
     def write(self, command):
         BRIDGE.mkdir(parents=True, exist_ok=True)
@@ -342,7 +506,9 @@ class Controller:
         if not breed and not upgrade:
             self.stop()
             return
-        self.command.update(Breed=breed, TankUpgrade=upgrade)
+        self.command.update(Breed=breed, TankUpgrade=upgrade,
+                            Rarities=[i for i, flag in enumerate(self.flags) if flag.get()],
+                            StarsFirst=self.priority.current() == 1)
         self.tick_status()
 
     def close(self):
@@ -356,7 +522,10 @@ class Controller:
             if connected:
                 state = json.loads(path.read_text(encoding="utf-8"))
                 self.status.set(("실행 중 · " if state["Running"] else "") + state["Message"])
-                if self.command:
+                connected = state.get("Version") == 2
+                if not connected:
+                    self.status.set("새 모듈을 적용하려면 게임을 다시 시작하세요.")
+                elif self.command:
                     self.write(self.command)
             else:
                 self.status.set("게임 플러그인 연결 대기 중")
@@ -388,14 +557,20 @@ if __name__ == "__main__":
         raise SystemExit(0)
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("PCFish.Automation.Pink")
     root = tk.Tk()
+    root.withdraw()
     if len(sys.argv) == 3 and sys.argv[1] == "--install-module":
-        root.withdraw()
         try:
             install_module(Path(sys.argv[2]))
-            messagebox.showinfo("모듈 설치", "설치를 마쳤습니다. 게임을 실행하세요.")
         except (OSError, ValueError, zipfile.BadZipFile, subprocess.SubprocessError) as error:
-            messagebox.showerror("모듈 설치 실패", str(error))
-        root.destroy()
+            messagebox.showerror("모듈 설치 실패", str(error), parent=root)
+            raise SystemExit(1)
+        finally:
+            root.destroy()
     else:
-        Controller(root)
-        root.mainloop()
+        game = setup_game(root)
+        if game is None:
+            root.destroy()
+        else:
+            Controller(root, game)
+            root.deiconify()
+            root.mainloop()

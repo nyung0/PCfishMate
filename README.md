@@ -46,6 +46,6 @@ python pc_fish_helper.py --self-test
 
 ## 내부 교배 자동화
 
-별도 컨트롤러에서 설치, 연결 상태, 교배 시작·중지와 로그를 확인할 수 있습니다. [내부 플러그인과 컨트롤러](internal/README.md)
+Windows EXE의 첫 실행에서 설치를 마치면 컨트롤러가 열립니다. 실행 중에도 교배 허용 희귀도를 변경할 수 있고, 교배와 수조 레벨업의 시간별 기록을 볼 수 있습니다. [내부 플러그인과 컨트롤러](internal/README.md)
 
 게임 스프라이트는 설치본에서 추출합니다. 소스 실행 전 `python -m pip install UnityPy`와 `python extract_sprites.py`를 실행하세요.

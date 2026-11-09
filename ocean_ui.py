@@ -1,4 +1,5 @@
 import tkinter as tk
+from math import isqrt
 from tkinter import ttk
 
 RARITIES = ("기본", "일반", "고급", "희귀", "전설", "신화")
@@ -12,12 +13,45 @@ MUTED = "#485D60"
 RARITY_COLORS = (MUTED, TEXT, "#235F54", "#235C72", "#89421F", "#6E4775")
 
 
+def rounded_image(root, width, height, radius, fill):
+    image = tk.PhotoImage(master=root, width=width, height=height)
+    for y in range(height):
+        edge = max(0, radius - min(y, height - 1 - y))
+        inset = radius - isqrt(radius * radius - edge * edge)
+        image.put(fill, to=(inset, y, width - inset, y + 1))
+    return image
+
+
+def rounded_card(canvas, x, y, right, bottom, fill, outline, radius=12):
+    points = (x, y + radius, x, y, x + radius, y, right - radius, y,
+              right, y, right, y + radius, right, bottom - radius,
+              right, bottom, right - radius, bottom, x + radius, bottom,
+              x, bottom, x, bottom - radius)
+    return canvas.create_polygon(points, smooth=True, fill=fill, outline=outline)
+
+
 def ocean_style(root):
+    if getattr(root, "_ocean_styled", False):
+        return
+    root._ocean_styled = True
     root.configure(bg=OCEAN)
     style = ttk.Style(root)
     style.theme_use("clam")
     style.configure(".", background=OCEAN, foreground=TEXT, font=("Malgun Gothic", 10))
-    style.configure("TButton", background=PANEL, bordercolor=WATER, padding=(7, 4))
+    normal, hover, pressed, disabled, focused = (
+        rounded_image(root, 32, 28, 9, color)
+        for color in (PANEL, "#FFE5B9", "#F3BE9B", "#D7E4DC", "#FFDBA6"))
+    root.button_images = (normal, hover, pressed, disabled, focused)
+    style.element_create("Ocean.button", "image", normal, ("disabled", disabled),
+                         ("pressed", pressed), ("active", hover), ("focus", focused),
+                         border=10, sticky="nsew")
+    style.layout("TButton", [("Ocean.button", {"sticky": "nswe", "children": [
+        ("Button.padding", {"sticky": "nswe", "children": [
+            ("Button.label", {"sticky": "nswe"}),
+        ]}),
+    ]})])
+    style.configure("TButton", padding=(13, 7))
+    style.map("TButton", foreground=[("disabled", MUTED)])
     for control in ("TEntry", "TSpinbox"):
         style.configure(control, fieldbackground=PANEL, insertcolor=TEXT)
     style.configure("TCombobox", fieldbackground=PANEL, background=PANEL,
@@ -29,13 +63,9 @@ def ocean_style(root):
     style.map("TNotebook.Tab", background=[("selected", WATER)],
               padding=[("selected", (26, 12))],
               font=[("selected", ("Malgun Gothic", 11, "bold"))])
-    style.map("TButton", background=[("active", ACCENT)])
     style.map("TCheckbutton", background=[("active", OCEAN)])
-    empty = tk.PhotoImage(master=root, width=16, height=16)
-    empty.put(WATER, to=(1, 1, 15, 15))
-    empty.put(PANEL, to=(2, 2, 14, 14))
-    checked = empty.copy()
-    checked.put(ACCENT, to=(2, 2, 14, 14))
+    empty = rounded_image(root, 16, 16, 5, PANEL)
+    checked = rounded_image(root, 16, 16, 5, "#F3BE9B")
     for x, y in ((4, 8), (5, 9), (6, 10), (7, 9), (8, 8), (9, 7), (10, 6), (11, 5)):
         checked.put(TEXT, to=(x, y, x + 1, y + 2))
     root.check_images = (empty, checked)
@@ -90,8 +120,8 @@ class CardGrid(ttk.Frame):
             row, column = divmod(i, columns)
             x, y = column * step + 4, row * 122 + 4
             center = x + (step - 8) / 2
-            canvas.create_rectangle(x, y, x + step - 8, y + 112,
-                                    fill=PANEL if owned else "#DCE5DC", outline=WATER if owned else MUTED)
+            rounded_card(canvas, x, y, x + step - 8, y + 112,
+                         fill=PANEL if owned else "#DCE5DC", outline=WATER if owned else MUTED)
             if picture:
                 canvas.create_image(center, y + 26, image=picture)
             canvas.create_text(center, y + 60, text=name, width=int(step - 18),
@@ -104,5 +134,3 @@ class CardGrid(ttk.Frame):
                                font=("Malgun Gothic", 9))
         rows = (len(self.cards) + columns - 1) // columns
         canvas.configure(scrollregion=(0, 0, width, rows * 122))
-
-

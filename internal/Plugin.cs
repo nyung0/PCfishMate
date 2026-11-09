@@ -8,7 +8,7 @@ using BepInEx.Configuration;
 using BepInEx.Unity.IL2CPP;
 using HarmonyLib;
 
-[BepInPlugin("pcfish.helper.internal", "PC Fish Internal Breeding", "0.1.0")]
+[BepInPlugin("pcfish.helper.internal", "PC Fish Internal Breeding", "0.2.0")]
 public sealed class Plugin : BasePlugin
 {
     private const BindingFlags Members = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
@@ -24,6 +24,8 @@ public sealed class Plugin : BasePlugin
     private int heartsBefore, fishBefore;
     private bool waiting;
     private double nextUpgrade;
+    private int? upgradeFrom;
+    private double upgradeDeadline;
     private bool upgradePopup;
     private readonly HashSet<string> fishIdsBefore = new();
     private string?[] parentVariants = Array.Empty<string?>();
@@ -70,6 +72,8 @@ public sealed class Plugin : BasePlugin
     private static void CaptureHome(object __instance) => home = __instance;
 
     private bool previousF7;
+    private bool previousF8;
+    private double nextBridge;
     private bool sawUpdate;
 
     private static void Tick(object __instance)
@@ -90,22 +94,31 @@ public sealed class Plugin : BasePlugin
                 plugin.Config.Reload();
                 plugin.Log.LogInfo($"Config reloaded; breeding enabled: {plugin.enabled.Value}.");
             }
+        }
+        if (plugin.clock.Elapsed.TotalSeconds >= plugin.nextBridge)
+        {
+            plugin.nextBridge = plugin.clock.Elapsed.TotalSeconds + 0.25;
             plugin.PollBridge();
         }
         bool f7 = GetAsyncKeyState(0x76) < 0;
-        if (f7 && !plugin.previousF7)
+        if (f7 && !plugin.previousF7 && plugin.command is null)
         {
             plugin.enabled.Value = !plugin.enabled.Value;
-            plugin.Log.LogInfo(plugin.enabled.Value ? "Automatic breeding started." : "Automatic breeding stopped.");
+            plugin.Record(plugin.enabled.Value ? "자동화 시작" : "자동화 중지", "F7 · 교배");
         }
         plugin.previousF7 = f7;
-        if (GetAsyncKeyState(0x77) < 0)
+        bool f8 = GetAsyncKeyState(0x77) < 0;
+        if (f8)
         {
+            if (!plugin.previousF8 && (plugin.enabled.Value || plugin.bridgeEnabled))
+                plugin.Record("자동화 중지", "F8");
             plugin.enabled.Value = false;
             plugin.blockedRun = plugin.bridgeRun;
             plugin.bridgeEnabled = false;
         }
-        if (!plugin.enabled.Value && !plugin.bridgeEnabled && !plugin.waiting)
+        plugin.previousF8 = f8;
+        if (!plugin.enabled.Value && !plugin.bridgeEnabled && !plugin.waiting
+            && plugin.upgradeFrom is null && !plugin.upgradePopup)
             return;
         try
         {
@@ -118,34 +131,58 @@ public sealed class Plugin : BasePlugin
             plugin.bridgeEnabled = false;
             plugin.message = error.GetBaseException().Message;
             plugin.waiting = false;
-            plugin.Log.LogError($"Breeding stopped: {error.GetBaseException().Message}");
+            plugin.upgradeFrom = null;
+            plugin.upgradePopup = false;
+            plugin.Record("오류", plugin.message);
         }
     }
 
-    private sealed record Command(string RunId, bool Enabled, int Interval, int[] Rarities,
+    private sealed record Command(string RunId, bool Enabled, int Interval, int[]? Rarities,
         bool? Breed, bool TankUpgrade, bool StarsFirst);
     private Command? command;
+
+    private void Record(string kind, string detail, string?[]? parents = null, string? child = null)
+    {
+        var entry = JsonSerializer.Serialize(new {
+            Time = DateTimeOffset.Now, Kind = kind, Message = detail, Parents = parents, Child = child,
+        });
+        Log.LogInfo($"{kind} · {detail}");
+        try
+        {
+            Directory.CreateDirectory(bridge);
+            File.AppendAllText(Path.Combine(bridge, "events.jsonl"), entry + Environment.NewLine);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            Log.LogWarning($"Automation history unavailable: {error.Message}");
+        }
+    }
+
+    private Command? ReadCommand()
+    {
+        var path = Path.Combine(bridge, "command.json");
+        return DateTime.UtcNow - File.GetLastWriteTimeUtc(path) < TimeSpan.FromSeconds(5)
+            ? JsonSerializer.Deserialize<Command>(File.ReadAllText(path))
+            : null;
+    }
 
     private void PollBridge()
     {
         try
         {
             Directory.CreateDirectory(bridge);
-            var path = Path.Combine(bridge, "command.json");
-            command = DateTime.UtcNow - File.GetLastWriteTimeUtc(path) < TimeSpan.FromSeconds(5)
-                ? JsonSerializer.Deserialize<Command>(File.ReadAllText(path))
-                : null;
-            if (command?.Enabled == false && enabled.Value)
+            command = ReadCommand();
+            if (command is not null && enabled.Value)
                 enabled.Value = false;
             bridgeRun = command?.RunId;
             bool requested = command is { Enabled: true } && bridgeRun != blockedRun;
             if (requested != bridgeEnabled)
-                Log.LogInfo(requested ? "Controller started automation." : "Controller stopped automation.");
+                Record(requested ? "자동화 시작" : "자동화 중지", "컨트롤러");
             bridgeEnabled = requested;
             var status = Path.Combine(bridge, "status.json");
             var temporary = status + ".tmp";
             File.WriteAllText(temporary, JsonSerializer.Serialize(new {
-                Running = enabled.Value || bridgeEnabled, Message = message,
+                Version = 2, Running = enabled.Value || bridgeEnabled, Message = message,
             }));
             File.Move(temporary, status, overwrite: true);
         }
@@ -206,12 +243,11 @@ public sealed class Plugin : BasePlugin
                 child = Read(added[0]!, "Fish") as string;
             waiting = false;
             message = "게임에서 교배 완료 확인";
-            Log.LogInfo("The game confirmed breeding.");
-            Log.LogInfo("BREED_RESULT " + JsonSerializer.Serialize(new { Parents = parentVariants, Child = child }));
+            Record("교배 완료", message, parentVariants, child);
         }
-        if (!enabled.Value && !bridgeEnabled)
-            return;
         if (TryUpgrade(now))
+            return;
+        if (!enabled.Value && !bridgeEnabled)
             return;
         if (bridgeEnabled && command?.Breed == false)
             return;
@@ -223,6 +259,11 @@ public sealed class Plugin : BasePlugin
         if (now < nextBreed)
             return;
 
+        if (bridgeEnabled && command?.Rarities is not { Length: > 0 })
+        {
+            message = "교배에 사용할 희귀도를 선택하세요";
+            return;
+        }
         var parents = Candidates(fish, count).Take(2).ToArray();
         if (parents.Length != 2)
         {
@@ -254,7 +295,7 @@ public sealed class Plugin : BasePlugin
             {
                 Call(breed, "ResetParentFishList");
                 message = "게임이 부모 지정을 거절했습니다";
-                Log.LogWarning(message);
+                Record("교배 건너뜀", message);
                 nextBreed = now + Interval;
                 return;
             }
@@ -263,6 +304,19 @@ public sealed class Plugin : BasePlugin
         if (selected is null || !new HashSet<object?> { Item(selected, 0), Item(selected, 1) }
             .SetEquals(parents.Select(parent => (object?)parent.Id)))
             throw new InvalidOperationException("The game did not retain the selected parent IDs.");
+        // Read the current selection again before spending a heart.
+        if (bridgeEnabled)
+        {
+            var latest = ReadCommand();
+            var allowed = latest?.Rarities;
+            if (latest is null || !latest.Enabled || latest.Breed == false || allowed is null
+                || latest.RunId != bridgeRun || parents.Any(parent => !allowed.Contains(parent.Rarity)))
+            {
+                Call(breed, "ResetParentFishList");
+                message = "교배 설정이 변경되어 다시 확인 중";
+                return;
+            }
+        }
         heartsBefore = hearts;
         fishBefore = count;
         fishIdsBefore.Clear();
@@ -281,12 +335,33 @@ public sealed class Plugin : BasePlugin
         waitUntil = now + 20;
         nextBreed = now + Interval;
         message = "교배 결과 확인 중";
-        Log.LogInfo($"Invoking breed with {hearts} hearts available.");
+        Record("교배 요청", $"사용 가능 하트 {hearts}개", parentVariants);
         Call(breed, "Breed");
     }
 
     private bool TryUpgrade(double now)
     {
+        if (upgradeFrom is int previousLevel)
+        {
+            int level = (int)Read(data!, "tankLevel")!;
+            if (level > previousLevel)
+            {
+                upgradeFrom = null;
+                upgradePopup = true;
+                nextUpgrade = now + 1;
+                message = $"수조 레벨업 · Lv.{previousLevel} → Lv.{level}";
+                Record("수조 레벨업", message);
+            }
+            else if (now >= upgradeDeadline)
+            {
+                upgradeFrom = null;
+                blockedRun = bridgeRun;
+                bridgeEnabled = false;
+                message = "게임에서 수조 레벨업을 확인하지 못했습니다";
+                Record("오류", message);
+            }
+            return true;
+        }
         if (upgradePopup)
         {
             if (now < nextUpgrade)
@@ -309,23 +384,16 @@ public sealed class Plugin : BasePlugin
             Call(ui, "ChangeTabMenu", 0);
             return true;
         }
-        int previous = (int)Read(data, "tankLevel")!;
+        upgradeFrom = (int)Read(data, "tankLevel")!;
+        upgradeDeadline = now + 15;
         Call(home, "TankLevelUp");
-        int current = (int)Read(data, "tankLevel")!;
-        nextUpgrade = now + 3;
-        upgradePopup = current > previous;
-        if (upgradePopup)
-        {
-            message = $"수조 레벨업 · Lv.{previous} → Lv.{current}";
-            Log.LogInfo(message);
-        }
         return true;
     }
 
     private IEnumerable<(string Id, int Rarity, int Stars)> Candidates(object fish, int count)
     {
         var allowed = bridgeEnabled && command is not null
-            ? command.Rarities.ToHashSet()
+            ? (command.Rarities ?? Array.Empty<int>()).ToHashSet()
             : grades.Value.Split(',').Select(value => int.TryParse(value, out int rank) ? rank : -1).ToHashSet();
         var now = DateTimeOffset.UtcNow;
         var candidates = new List<(string Id, int Rarity, int Stars)>();
