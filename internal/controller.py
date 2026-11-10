@@ -347,6 +347,7 @@ class Controller:
         self.merge_enabled = tk.BooleanVar(value=False)
         self.same_breed = tk.BooleanVar(value=False)
         self.same_merge = tk.BooleanVar(value=True)
+        self.same_merge_stars = tk.BooleanVar(value=True)
         self.merge_filters = [tk.BooleanVar(value=True) for _ in range(4)]
         self.merge_rarities = [tk.BooleanVar(value=True) for _ in range(5)]
         self.merge_options_window = None
@@ -410,13 +411,13 @@ class Controller:
         window.transient(self.root)
         panel = ttk.Frame(window, padding=16)
         panel.pack(fill="both", expand=True)
-        saved = [*self.merge_filters, *self.merge_rarities, self.same_merge]
+        saved = [*self.merge_filters, *self.merge_rarities, self.same_merge_stars, self.same_merge]
         draft = [tk.BooleanVar(window, value=flag.get()) for flag in saved]
         for heading, labels, flags in (
             ("자동 등록 조건", ("남은 교배 횟수가 0인 물고기만 등록", "수조에 배치된 물고기는 제외",
                               "시즌 물고기는 제외", "시즌 물고기 재료는 제외"), draft[:4]),
             ("종 희귀도 조건", RARITIES[1:], draft[4:9]),
-            ("재료 조합", ("같은 희귀도 10마리만 합성",), draft[9:]),
+            ("재료 조합", ("같은 별 등급 10마리만 합성", "같은 희귀도 10마리만 합성"), draft[9:]),
         ):
             group = ttk.LabelFrame(panel, text=heading, padding=8)
             group.pack(fill="x", pady=4)
@@ -445,7 +446,8 @@ class Controller:
             "AutoMerge": self.merge_enabled.get(), "SameBreedRarity": self.same_breed.get(),
             "StarsFirst": self.priority.current() == 1,
             "Rarities": [i for i, flag in enumerate(self.flags) if flag.get()],
-            "Merge": {"SameRarity": self.same_merge.get(), "ZeroBreeds": zero,
+            "Merge": {"SameRarity": self.same_merge.get(), "SameStars": self.same_merge_stars.get(),
+                      "ZeroBreeds": zero,
                       "ExcludePlaced": placed, "ExcludeSeason": season, "ExcludeSeasonMaterials": materials,
                       "Rarities": [i for i, flag in enumerate(self.merge_rarities, 1) if flag.get()],
                       "SeasonIds": season_ids, "SeasonMaterials": material_ids},
