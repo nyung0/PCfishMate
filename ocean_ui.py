@@ -4,21 +4,24 @@ from tkinter import ttk
 
 RARITIES = ("기본", "일반", "고급", "희귀", "전설", "신화")
 
-OCEAN = "#91C6BC"
-PANEL = "#F6F3C2"
-WATER = "#4B9DA9"
-ACCENT = "#E37434"
-TEXT = "#183E43"
-MUTED = "#485D60"
-RARITY_COLORS = (MUTED, TEXT, "#235F54", "#235C72", "#89421F", "#6E4775")
+OCEAN = "#10274B"
+PANEL = "#1A416F"
+WATER = "#245889"
+EDGE = "#6AACE5"
+ACCENT = "#FFCE70"
+TEXT = "#F2F7FF"
+MUTED = "#B5C8E3"
+RARITY_COLORS = (MUTED, TEXT, "#8CE1A8", "#8BD9FF", "#FFD177", "#EDABFF")
 
 
-def rounded_image(root, width, height, radius, fill):
+def rounded_image(root, width, height, radius, fill, outline=None):
     image = tk.PhotoImage(master=root, width=width, height=height)
     for y in range(height):
         edge = max(0, radius - min(y, height - 1 - y))
         inset = radius - isqrt(radius * radius - edge * edge)
-        image.put(fill, to=(inset, y, width - inset, y + 1))
+        image.put(outline or fill, to=(inset, y, width - inset, y + 1))
+        if outline and 1 <= y < height - 2:
+            image.put(fill, to=(inset + 1, y, width - inset - 1, y + 1))
     return image
 
 
@@ -38,24 +41,34 @@ def ocean_style(root):
     style = ttk.Style(root)
     style.theme_use("clam")
     style.configure(".", background=OCEAN, foreground=TEXT, font=("Malgun Gothic", 10))
-    normal, hover, pressed, disabled, focused = (
-        rounded_image(root, 32, 28, 9, color)
-        for color in (PANEL, "#FFE5B9", "#F3BE9B", "#D7E4DC", "#FFDBA6"))
-    root.button_images = (normal, hover, pressed, disabled, focused)
-    style.element_create("Ocean.button", "image", normal, ("disabled", disabled),
-                         ("pressed", pressed), ("active", hover), ("focus", focused),
-                         border=10, sticky="nsew")
-    style.layout("TButton", [("Ocean.button", {"sticky": "nswe", "children": [
-        ("Button.padding", {"sticky": "nswe", "children": [
-            ("Button.label", {"sticky": "nswe"}),
-        ]}),
-    ]})])
-    style.configure("TButton", padding=(13, 7))
-    style.map("TButton", foreground=[("disabled", MUTED)])
+    root.button_images = []
+    for name, button_style, colors in (
+        ("Ocean", "TButton", ("#285F96", "#367BB8", "#194570")),
+        ("Primary", "Primary.TButton", ("#246D57", "#338669", "#174D3D")),
+        ("Stop", "Stop.TButton", ("#9B4053", "#B34C63", "#722B3B")),
+    ):
+        fills = [(color, EDGE) for color in colors]
+        fills.extend((("#263D59", "#507193"), (colors[0], ACCENT)))
+        normal, hover, pressed, disabled, focused = (
+            rounded_image(root, 32, 28, 6, fill, border) for fill, border in fills)
+        root.button_images.extend((normal, hover, pressed, disabled, focused))
+        element = f"{name}.button"
+        style.element_create(element, "image", normal, ("disabled", disabled),
+                             ("pressed", pressed), ("active", hover), ("focus", focused),
+                             border=8, sticky="nsew")
+        style.layout(button_style, [(element, {"sticky": "nswe", "children": [
+            ("Button.padding", {"sticky": "nswe", "children": [
+                ("Button.label", {"sticky": "nswe"}),
+            ]}),
+        ]})])
+        style.configure(button_style, padding=(13, 7), foreground=TEXT)
+        style.map(button_style, foreground=[("disabled", MUTED)])
     for control in ("TEntry", "TSpinbox"):
-        style.configure(control, fieldbackground=PANEL, insertcolor=TEXT)
+        style.configure(control, fieldbackground=PANEL, insertcolor=TEXT,
+                        bordercolor=EDGE, arrowcolor=TEXT)
     style.configure("TCombobox", fieldbackground=PANEL, background=PANEL,
-                    selectbackground=PANEL, selectforeground=TEXT, padding=4)
+                    selectbackground=PANEL, selectforeground=TEXT, padding=4,
+                    bordercolor=EDGE, arrowcolor=TEXT)
     style.map("TCombobox", fieldbackground=[("readonly", PANEL)],
               foreground=[("readonly", TEXT)])
     style.configure("TNotebook", borderwidth=0)
@@ -63,9 +76,17 @@ def ocean_style(root):
     style.map("TNotebook.Tab", background=[("selected", WATER)],
               padding=[("selected", (26, 12))],
               font=[("selected", ("Malgun Gothic", 11, "bold"))])
+    style.configure("Treeview", background=PANEL, fieldbackground=PANEL, foreground=TEXT,
+                    rowheight=27, bordercolor=EDGE)
+    style.configure("Treeview.Heading", background=WATER, foreground=TEXT, relief="flat")
+    style.map("Treeview", background=[("selected", "#367BB8")], foreground=[("selected", TEXT)])
+    style.map("Treeview.Heading", background=[("active", "#367BB8")])
+    style.configure("TScrollbar", background=WATER, troughcolor=OCEAN, arrowcolor=TEXT)
+    root.option_add("*TCombobox*Listbox.background", PANEL)
+    root.option_add("*TCombobox*Listbox.foreground", TEXT)
     style.map("TCheckbutton", background=[("active", OCEAN)])
-    empty = rounded_image(root, 16, 16, 5, PANEL)
-    checked = rounded_image(root, 16, 16, 5, "#F3BE9B")
+    empty = rounded_image(root, 16, 16, 4, PANEL, EDGE)
+    checked = rounded_image(root, 16, 16, 4, "#3475AB", EDGE)
     for x, y in ((4, 8), (5, 9), (6, 10), (7, 9), (8, 8), (9, 7), (10, 6), (11, 5)):
         checked.put(TEXT, to=(x, y, x + 1, y + 2))
     root.check_images = (empty, checked)
@@ -121,7 +142,7 @@ class CardGrid(ttk.Frame):
             x, y = column * step + 4, row * 122 + 4
             center = x + (step - 8) / 2
             rounded_card(canvas, x, y, x + step - 8, y + 112,
-                         fill=PANEL if owned else "#DCE5DC", outline=WATER if owned else MUTED)
+                         fill=PANEL if owned else "#172F50", outline=EDGE if owned else "#507193")
             if picture:
                 canvas.create_image(center, y + 26, image=picture)
             canvas.create_text(center, y + 60, text=name, width=int(step - 18),

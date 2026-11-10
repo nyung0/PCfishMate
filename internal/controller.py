@@ -189,13 +189,9 @@ def setup_game(root):
     if previous is not None and ready_game(previous):
         return previous
 
-    ocean_style(root)
     wizard = tk.Toplevel(root)
     wizard.title("PC FISH · 초기 설정")
     wizard.resizable(False, False)
-    icon = ASSETS / "pcfish.ico"
-    if icon.is_file():
-        wizard.iconbitmap(str(icon))
     panel = ttk.Frame(wizard, padding=22)
     panel.pack(fill="both", expand=True)
     ttk.Label(panel, text="PC FISH 설치 설정", font=("Malgun Gothic", 16, "bold")).pack(anchor="w")
@@ -215,8 +211,7 @@ def setup_game(root):
         "게임을 종료한 뒤 진행해 주세요. Windows 관리자 권한이 필요할 수 있습니다."
     )).pack(anchor="w", pady=12)
     consent = tk.BooleanVar()
-    ttk.Checkbutton(panel, text="위 설치 내용에 동의합니다.", variable=consent,
-                    style="Ocean.TCheckbutton").pack(anchor="w")
+    ttk.Checkbutton(panel, text="위 설치 내용에 동의합니다.", variable=consent).pack(anchor="w")
     status = tk.StringVar()
     ttk.Label(panel, textvariable=status, wraplength=475).pack(anchor="w", pady=8)
     buttons = ttk.Frame(panel)
@@ -359,9 +354,10 @@ class Controller:
         self.interval = tk.StringVar(value="10")
         ttk.Label(controls, text="교배 간격 (초)").pack(side="left")
         ttk.Spinbox(controls, textvariable=self.interval, width=5, from_=1, to=3600).pack(side="left", padx=6)
-        self.start_button = ttk.Button(controls, text="자동화 시작", command=self.start)
+        self.start_button = ttk.Button(controls, text="자동화 시작", command=self.start,
+                                       style="Primary.TButton")
         self.start_button.pack(side="left", padx=4)
-        ttk.Button(controls, text="중지", command=self.stop).pack(side="left")
+        ttk.Button(controls, text="중지", command=self.stop, style="Stop.TButton").pack(side="left")
         ttk.Button(controls, text="로그 보기", command=self.open_log).pack(side="left", padx=6)
         ttk.Label(panel, text="자동화 기록").pack(anchor="w", pady=(6, 4))
         history_panel = ttk.Frame(panel)
