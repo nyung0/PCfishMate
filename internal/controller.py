@@ -334,7 +334,7 @@ class Controller:
         panel = ttk.Frame(tabs, padding=16)
         tabs.add(panel, text="자동화")
         season = SeasonTab(tabs, self.game_path)
-        tabs.add(season, text="합성")
+        tabs.add(season, text="시즌합성")
         tabs.bind("<<NotebookTabChanged>>", lambda _: season.refresh())
         self.status = tk.StringVar(value="게임 플러그인 연결 대기 중")
         tk.Label(panel, textvariable=self.status, bg=PANEL, fg=TEXT, anchor="w",
