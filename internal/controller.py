@@ -292,6 +292,9 @@ class Controller:
     def __init__(self, root, game):
         self.root = root
         self.command = None
+        self.connection_deadline = None
+        self.connected = False
+        self.incompatible = False
         self.run_id = uuid4().hex
         root.title("PC FISH · 바다 도감")
         icon = ASSETS / "pcfish.ico"
@@ -484,9 +487,24 @@ class Controller:
         self.command = {"RunId": self.run_id, "Enabled": True, "Interval": interval, "Rarities": selected,
                         "Breed": breed, "TankUpgrade": upgrade, "StarsFirst": self.priority.current() == 1}
         self.tick_status()
+        if self.connected:
+            return
+        if self.incompatible:
+            self.command = None
+            return
+        try:
+            os.startfile("steam://rungameid/4842670")
+        except OSError as error:
+            self.command = None
+            self.status.set(f"게임 실행 실패 · {error}")
+            return
+        self.connection_deadline = time.monotonic() + 90
+        self.tick_status()
 
     def stop(self):
         self.command = None
+        self.connection_deadline = None
+        self.start_button.state(["!disabled"])
         try:
             self.write({"RunId": self.run_id, "Enabled": False, "Interval": 10, "Rarities": []})
         except OSError as error:
@@ -509,6 +527,8 @@ class Controller:
         self.root.destroy()
 
     def tick_status(self):
+        self.connected = False
+        self.incompatible = False
         try:
             path = BRIDGE / "status.json"
             connected = time.time() - path.stat().st_mtime < 5
@@ -517,15 +537,27 @@ class Controller:
                 self.status.set(("실행 중 · " if state["Running"] else "") + state["Message"])
                 connected = state.get("Version") == 2
                 if not connected:
+                    self.incompatible = True
+                    self.command = None
+                    self.connection_deadline = None
                     self.status.set("새 모듈을 적용하려면 게임을 다시 시작하세요.")
-                elif self.command:
-                    self.write(self.command)
+                else:
+                    self.connected = True
+                    self.connection_deadline = None
+                    if self.command:
+                        self.write(self.command)
             else:
                 self.status.set("게임 플러그인 연결 대기 중")
         except (OSError, ValueError, KeyError):
-            connected = False
             self.status.set("게임 플러그인 연결 대기 중")
-        self.start_button.state(["!disabled"] if connected else ["disabled"])
+        if self.connection_deadline is not None:
+            if time.monotonic() < self.connection_deadline:
+                self.status.set("게임 시작 중 · 모듈이 연결되면 자동화를 시작합니다.")
+            else:
+                self.command = None
+                self.connection_deadline = None
+                self.status.set("게임 모듈 연결 시간 초과 · 게임을 확인하고 다시 시작하세요.")
+        self.start_button.state(["disabled"] if self.connection_deadline is not None else ["!disabled"])
 
     def tick(self):
         self.tick_status()
