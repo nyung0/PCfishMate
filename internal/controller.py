@@ -144,6 +144,17 @@ def ready_game(game):
         return False
 
 
+def season_merge_exclusions(game):
+    assets = (game / "PCFish_Data/resources.assets").read_bytes()
+    tables = re.findall(rb"recipeFishGrade,recipeAmount\r?\n((?:[0-9][^\x00\r\n]+\r?\n?)+)", assets)
+    rows = [row for table in tables for row in re.findall(
+        rb"(?m)^\d+,(FS\d{5}),\d+,(FS\d{5}),(\d+),\d+", table)]
+    if not rows:
+        raise ValueError("게임에서 시즌 합성 재료 목록을 확인할 수 없습니다.")
+    return sorted({target.decode() for target, _, _ in rows}), sorted({
+        f"{material.decode()}:{int(grade)}" for _, material, grade in rows})
+
+
 class ShellExecuteInfo(ctypes.Structure):
     _fields_ = [
         ("size", wintypes.DWORD), ("mask", wintypes.ULONG), ("window", wintypes.HWND),
@@ -333,9 +344,18 @@ class Controller:
         modes.pack(anchor="w", pady=(0, 6))
         self.breed_enabled = tk.BooleanVar(value=True)
         self.upgrade_enabled = tk.BooleanVar(value=False)
-        for label, flag in (("교배 자동화", self.breed_enabled), ("수조 레벨업 자동화", self.upgrade_enabled)):
+        self.merge_enabled = tk.BooleanVar(value=False)
+        self.same_breed = tk.BooleanVar(value=False)
+        self.same_merge = tk.BooleanVar(value=True)
+        self.merge_filters = [tk.BooleanVar(value=True) for _ in range(4)]
+        self.merge_rarities = [tk.BooleanVar(value=True) for _ in range(5)]
+        self.merge_options_window = None
+        self.merge_exclusions = None
+        for label, flag in (("교배 자동화", self.breed_enabled), ("수조 레벨업 자동화", self.upgrade_enabled),
+                            ("합성 자동화", self.merge_enabled)):
             ttk.Checkbutton(modes, text=label, variable=flag,
                             style="Ocean.TCheckbutton", command=self.update_modes).pack(side="left", padx=(0, 14))
+        ttk.Button(modes, text="합성 옵션", command=self.open_merge_options).pack(side="left")
         ttk.Label(panel, text="교배 허용 희귀도 · 두 부모 모두 적용").pack(anchor="w", pady=(2, 4))
         grades = ttk.Frame(panel)
         grades.pack(anchor="w")
@@ -343,6 +363,8 @@ class Controller:
         for grade, flag in zip(RARITIES, self.flags):
             ttk.Checkbutton(grades, text=grade, variable=flag,
                             style="Ocean.TCheckbutton", command=self.update_modes).pack(side="left", padx=(0, 8))
+        ttk.Checkbutton(panel, text="같은 희귀도끼리만 교배", variable=self.same_breed,
+                        style="Ocean.TCheckbutton", command=self.update_modes).pack(anchor="w", pady=(5, 0))
         priority = ttk.Frame(panel)
         priority.pack(anchor="w", pady=(8, 0))
         ttk.Label(priority, text="교배 우선순위").pack(side="left", padx=(0, 8))
@@ -378,6 +400,44 @@ class Controller:
         self.catalog_path = None
         self.catalog = None
         self.tick()
+
+    def open_merge_options(self):
+        if self.merge_options_window is not None and self.merge_options_window.winfo_exists():
+            self.merge_options_window.lift()
+            return
+        window = self.merge_options_window = tk.Toplevel(self.root)
+        window.title("PC FISH · 자동 합성 옵션")
+        panel = ttk.Frame(window, padding=16)
+        panel.pack(fill="both", expand=True)
+        for heading, labels, flags in (
+            ("자동 등록 조건", ("남은 교배 횟수가 0인 물고기만 등록", "수조에 배치된 물고기는 제외",
+                              "시즌 물고기는 제외", "시즌 물고기 재료는 제외"), self.merge_filters),
+            ("종 희귀도 조건", RARITIES[1:], self.merge_rarities),
+            ("재료 조합", ("같은 희귀도 10마리만 합성",), (self.same_merge,)),
+        ):
+            group = ttk.LabelFrame(panel, text=heading, padding=8)
+            group.pack(fill="x", pady=4)
+            for label, flag in zip(labels, flags):
+                ttk.Checkbutton(group, text=label, variable=flag, style="Ocean.TCheckbutton",
+                                command=self.update_modes).pack(anchor="w", pady=3)
+        ttk.Label(panel, text="게임의 일반 합성에서 사용할 별 등급을 먼저 선택하세요.").pack(anchor="w", pady=6)
+        ttk.Button(panel, text="확인", command=window.destroy).pack(anchor="e")
+
+    def mode_settings(self):
+        zero, placed, season, materials = (flag.get() for flag in self.merge_filters)
+        if self.merge_enabled.get() and (season or materials) and self.merge_exclusions is None:
+            self.merge_exclusions = season_merge_exclusions(Path(self.game_path.get()))
+        season_ids, material_ids = self.merge_exclusions or ([], [])
+        return {
+            "Breed": self.breed_enabled.get(), "TankUpgrade": self.upgrade_enabled.get(),
+            "AutoMerge": self.merge_enabled.get(), "SameBreedRarity": self.same_breed.get(),
+            "StarsFirst": self.priority.current() == 1,
+            "Rarities": [i for i, flag in enumerate(self.flags) if flag.get()],
+            "Merge": {"SameRarity": self.same_merge.get(), "ZeroBreeds": zero,
+                      "ExcludePlaced": placed, "ExcludeSeason": season, "ExcludeSeasonMaterials": materials,
+                      "Rarities": [i for i, flag in enumerate(self.merge_rarities, 1) if flag.get()],
+                      "SeasonIds": season_ids, "SeasonMaterials": material_ids},
+        }
 
     def open_log(self):
         if self.log_window is not None and self.log_window.winfo_exists():
@@ -454,12 +514,11 @@ class Controller:
                 event = json.loads(line)
                 stamp = datetime.fromisoformat(event["Time"]).astimezone().strftime("%Y-%m-%d %H:%M:%S")
                 kind, detail = event["Kind"], event["Message"]
-                if kind in ("교배 요청", "교배 완료"):
+                if kind == "교배 요청":
+                    continue
+                if kind == "교배 완료":
                     first, second = map(self.fish_label, event["Parents"])
-                    if kind == "교배 완료":
-                        detail = f"{first} + {second} → {self.fish_label(event['Child'])}"
-                    else:
-                        detail = f"{first} + {second} · {detail}"
+                    detail = f"{first} + {second} → {self.fish_label(event['Child'])}"
             except (KeyError, TypeError, ValueError):
                 continue
             self.history.insert("", "end", values=(stamp, kind, detail))
@@ -471,21 +530,23 @@ class Controller:
         temporary.replace(BRIDGE / "command.json")
 
     def start(self):
-        selected = [i for i, flag in enumerate(self.flags) if flag.get()]
-        breed, upgrade = self.breed_enabled.get(), self.upgrade_enabled.get()
-        if not breed and not upgrade:
+        try:
+            modes = self.mode_settings()
+        except (OSError, ValueError) as error:
+            self.status.set(f"합성 설정 오류 · {error}")
+            return
+        if not any(modes[key] for key in ("Breed", "TankUpgrade", "AutoMerge")):
             self.status.set("실행할 자동화 기능을 하나 이상 선택하세요.")
             return
         try:
-            interval = int(self.interval.get()) if breed else 10
-            if not 1 <= interval <= 3600 or (breed and not selected):
+            interval = int(self.interval.get()) if modes["Breed"] else 10
+            if not 1 <= interval <= 3600:
                 raise ValueError
         except ValueError:
-            self.status.set("희귀도를 체크하고 1~3600초 사이의 간격을 입력하세요.")
+            self.status.set("1~3600초 사이의 간격을 입력하세요.")
             return
         self.run_id = uuid4().hex
-        self.command = {"RunId": self.run_id, "Enabled": True, "Interval": interval, "Rarities": selected,
-                        "Breed": breed, "TankUpgrade": upgrade, "StarsFirst": self.priority.current() == 1}
+        self.command = {"RunId": self.run_id, "Enabled": True, "Interval": interval, **modes}
         self.tick_status()
         if self.connected:
             return
@@ -513,13 +574,16 @@ class Controller:
     def update_modes(self):
         if self.command is None:
             return
-        breed, upgrade = self.breed_enabled.get(), self.upgrade_enabled.get()
-        if not breed and not upgrade:
+        try:
+            modes = self.mode_settings()
+        except (OSError, ValueError) as error:
+            self.stop()
+            self.status.set(f"합성 설정 오류 · {error}")
+            return
+        if not any(modes[key] for key in ("Breed", "TankUpgrade", "AutoMerge")):
             self.stop()
             return
-        self.command.update(Breed=breed, TankUpgrade=upgrade,
-                            Rarities=[i for i, flag in enumerate(self.flags) if flag.get()],
-                            StarsFirst=self.priority.current() == 1)
+        self.command.update(modes)
         self.tick_status()
 
     def close(self):
@@ -535,7 +599,7 @@ class Controller:
             if connected:
                 state = json.loads(path.read_text(encoding="utf-8"))
                 self.status.set(("실행 중 · " if state["Running"] else "") + state["Message"])
-                connected = state.get("Version") == 2
+                connected = state.get("Version") == 3
                 if not connected:
                     self.incompatible = True
                     self.command = None

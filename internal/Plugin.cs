@@ -8,12 +8,12 @@ using BepInEx.Configuration;
 using BepInEx.Unity.IL2CPP;
 using HarmonyLib;
 
-[BepInPlugin("pcfish.helper.internal", "PC Fish Internal Breeding", "0.2.0")]
+[BepInPlugin("pcfish.helper.internal", "PC Fish Internal Breeding", "0.3.0")]
 public sealed class Plugin : BasePlugin
 {
     private const BindingFlags Members = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
     private static Plugin instance = null!;
-    private static object? data, ui, breed, home;
+    private static object? data, ui, breed, home, merge;
     private readonly Stopwatch clock = Stopwatch.StartNew();
     private ConfigEntry<bool> enabled = null!;
     private ConfigEntry<int> interval = null!;
@@ -27,6 +27,10 @@ public sealed class Plugin : BasePlugin
     private int? upgradeFrom;
     private double upgradeDeadline;
     private bool upgradePopup;
+    private HashSet<string>? mergePending;
+    private double mergeDeadline, nextMerge;
+    private string mergeSummary = "";
+    private static readonly string[] RarityNames = { "기본", "일반", "고급", "희귀", "전설", "신화" };
     private readonly HashSet<string> fishIdsBefore = new();
     private string?[] parentVariants = Array.Empty<string?>();
     private string message = "게임 연결됨 · 대기 중";
@@ -53,6 +57,7 @@ public sealed class Plugin : BasePlugin
             Hook("NN.PF.Core.Managers.GameDataManager", "Start", nameof(CaptureData)),
             Hook("NN.PF.Core.Managers.UIManager", "Start", nameof(CaptureUi)),
             Hook("NN.PF.UI.Home.UIHome", "OnEnable", nameof(CaptureHome)),
+            Hook("NN.PF.UI.Merge.UIMerge", "OnEnable", nameof(CaptureMerge)),
             Hook("NN.PF.Core.Managers.GameManager", "Update", nameof(Tick)),
         };
         foreach (var (target, postfix) in hooks)
@@ -70,6 +75,7 @@ public sealed class Plugin : BasePlugin
     private static void CaptureData(object __instance) => data = __instance;
     private static void CaptureUi(object __instance) => ui = __instance;
     private static void CaptureHome(object __instance) => home = __instance;
+    private static void CaptureMerge(object __instance) => merge = __instance;
 
     private bool previousF7;
     private bool previousF8;
@@ -118,7 +124,7 @@ public sealed class Plugin : BasePlugin
         }
         plugin.previousF8 = f8;
         if (!plugin.enabled.Value && !plugin.bridgeEnabled && !plugin.waiting
-            && plugin.upgradeFrom is null && !plugin.upgradePopup)
+            && plugin.upgradeFrom is null && !plugin.upgradePopup && plugin.mergePending is null)
             return;
         try
         {
@@ -133,12 +139,16 @@ public sealed class Plugin : BasePlugin
             plugin.waiting = false;
             plugin.upgradeFrom = null;
             plugin.upgradePopup = false;
+            plugin.mergePending = null;
             plugin.Record("오류", plugin.message);
         }
     }
 
     private sealed record Command(string RunId, bool Enabled, int Interval, int[]? Rarities,
-        bool? Breed, bool TankUpgrade, bool StarsFirst);
+        bool? Breed, bool TankUpgrade, bool StarsFirst, bool SameBreedRarity, bool AutoMerge, MergeOptions? Merge);
+    private sealed record MergeOptions(bool SameRarity, bool ZeroBreeds, bool ExcludePlaced,
+        bool ExcludeSeason, bool ExcludeSeasonMaterials, int[]? Rarities, string[]? SeasonIds,
+        string[]? SeasonMaterials);
     private Command? command;
 
     private void Record(string kind, string detail, string?[]? parents = null, string? child = null)
@@ -182,7 +192,7 @@ public sealed class Plugin : BasePlugin
             var status = Path.Combine(bridge, "status.json");
             var temporary = status + ".tmp";
             File.WriteAllText(temporary, JsonSerializer.Serialize(new {
-                Version = 2, Running = enabled.Value || bridgeEnabled, Message = message,
+                Version = 3, Running = enabled.Value || bridgeEnabled, Message = message,
             }));
             File.Move(temporary, status, overwrite: true);
         }
@@ -209,6 +219,11 @@ public sealed class Plugin : BasePlugin
             return;
         int count = (int)Read(fish, "Count")!;
 
+        if (mergePending is not null)
+        {
+            FinishMerge(fish, count, now);
+            return;
+        }
         if (waiting)
         {
             var added = Enumerable.Range(0, count).Select(i => Item(fish, i))
@@ -249,6 +264,8 @@ public sealed class Plugin : BasePlugin
             return;
         if (!enabled.Value && !bridgeEnabled)
             return;
+        if (TryMerge(fish, count, now))
+            return;
         if (bridgeEnabled && command?.Breed == false)
             return;
         if (hearts <= 0)
@@ -264,10 +281,15 @@ public sealed class Plugin : BasePlugin
             message = "교배에 사용할 희귀도를 선택하세요";
             return;
         }
-        var parents = Candidates(fish, count).Take(2).ToArray();
+        var candidates = Candidates(fish, count);
+        var parents = bridgeEnabled && command?.SameBreedRarity == true
+            ? candidates.GroupBy(item => item.Rarity).Select(group => group.Take(2).ToArray())
+                .FirstOrDefault(pair => pair.Length == 2) ?? Array.Empty<(string Id, int Rarity, int Stars)>()
+            : candidates.Take(2).ToArray();
         if (parents.Length != 2)
         {
-            message = "교배 가능한 서로 다른 개체 2마리 대기 중";
+            message = bridgeEnabled && command?.SameBreedRarity == true
+                ? "교배 가능한 같은 희귀도 2마리 대기 중" : "교배 가능한 서로 다른 개체 2마리 대기 중";
             return;
         }
         if (breed is null || !Active(breed))
@@ -310,7 +332,8 @@ public sealed class Plugin : BasePlugin
             var latest = ReadCommand();
             var allowed = latest?.Rarities;
             if (latest is null || !latest.Enabled || latest.Breed == false || allowed is null
-                || latest.RunId != bridgeRun || parents.Any(parent => !allowed.Contains(parent.Rarity)))
+                || latest.RunId != bridgeRun || parents.Any(parent => !allowed.Contains(parent.Rarity))
+                || (latest.SameBreedRarity && parents[0].Rarity != parents[1].Rarity))
             {
                 Call(breed, "ResetParentFishList");
                 message = "교배 설정이 변경되어 다시 확인 중";
@@ -335,8 +358,130 @@ public sealed class Plugin : BasePlugin
         waitUntil = now + 20;
         nextBreed = now + Interval;
         message = "교배 결과 확인 중";
-        Record("교배 요청", $"사용 가능 하트 {hearts}개", parentVariants);
         Call(breed, "Breed");
+    }
+
+    private static bool MergeEligible(object item, MergeOptions options, int grade, DateTimeOffset now)
+    {
+        if (Read(item, "Id") is not string { Length: > 0 } ||
+            Read(item, "Level") is not int rarity || rarity is < 1 or > 5 ||
+            options.Rarities?.Contains(rarity) != true ||
+            Read(item, "Grade") is not int stars || stars != grade ||
+            Read(item, "IsLocked") is true ||
+            (options.ExcludePlaced && Read(item, "IsPlaced") is true) ||
+            (options.ZeroBreeds && Read(item, "BreedCount") is not 0) ||
+            Read(item, "Type") is not string species)
+            return false;
+        if ((options.ExcludeSeason && (options.SeasonIds is not { Length: > 0 } ||
+                options.SeasonIds.Contains(species))) ||
+            (options.ExcludeSeasonMaterials && (options.SeasonMaterials is not { Length: > 0 } ||
+                options.SeasonMaterials.Contains($"{species}:{stars}"))))
+            return false;
+        return Read(item, "BreedNextDatetime") is not string { Length: > 0 } date ||
+            (DateTimeOffset.TryParse(date, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var ready)
+             && ready <= now);
+    }
+
+    private static string[] MergeSlots(object screen)
+    {
+        var list = Read(screen, "mergeFishList") ?? throw new InvalidOperationException("합성 슬롯을 읽지 못했습니다");
+        int size = list is Array array ? array.Length : (int)Read(list, "Length")!;
+        return Enumerable.Range(0, size).Select(i => Item(list, i)).OfType<string>()
+            .Where(id => id.Length > 0).ToArray();
+    }
+
+    private bool TryMerge(object fish, int count, double now)
+    {
+        if (!bridgeEnabled || command is not { AutoMerge: true, Merge: { } options } || now < nextMerge)
+            return false;
+        if (merge is null || Read(merge, "mergeType")?.ToString() != "Standard"
+            || Read(merge, "grade") is not int grade || grade is < 1 or > 5)
+        {
+            if (command.Breed == false)
+                message = "게임의 일반 합성에서 별 등급을 선택하세요";
+            return false;
+        }
+        if (ui is null || Read(ui, "isProcessing") is not false)
+            return false;
+        var utc = DateTimeOffset.UtcNow;
+        var candidates = Enumerable.Range(0, count).Select(i => Item(fish, i))
+            .OfType<object>().Where(item => MergeEligible(item, options, grade, utc))
+            .DistinctBy(item => (string)Read(item, "Id")!)
+            .OrderBy(item => (int)Read(item, "Level")!);
+        var batch = options.SameRarity
+            ? candidates.GroupBy(item => (int)Read(item, "Level")!)
+                .Select(group => group.Take(10).ToArray()).FirstOrDefault(group => group.Length == 10)
+            : candidates.Take(10).ToArray();
+        if (batch?.Length != 10)
+        {
+            if (command.Breed == false)
+                message = $"합성 재료 대기 중 · {grade}성";
+            return false;
+        }
+        if (!Active(merge))
+        {
+            nextMerge = now + 1;
+            if (Read(ui, "viewWindow") is object window && Read(window, "activeInHierarchy") is false)
+                Call(ui, "OpenWindow");
+            Call(ui, "ChangeTabMenu", 3);
+            return true;
+        }
+        if (Read(merge, "viewMergeType") is object picker && Read(picker, "activeInHierarchy") is true)
+            return true;
+        if (MergeSlots(merge).Length != 0)
+        {
+            message = "기존 합성 슬롯이 비기를 기다리는 중";
+            return true;
+        }
+        var ids = batch.Select(item => (string)Read(item, "Id")!).ToHashSet();
+        foreach (var id in ids)
+        {
+            if (Call(merge, "SetParent", id) is true)
+                continue;
+            Call(merge, "ResetParent");
+            nextMerge = now + Interval;
+            message = "게임이 합성 재료 등록을 거절했습니다";
+            return true;
+        }
+        var latest = ReadCommand();
+        var currentOptions = latest?.Merge;
+        if (latest is not { Enabled: true, AutoMerge: true } || latest.RunId != bridgeRun ||
+            currentOptions is null || batch.Any(item => !MergeEligible(item, currentOptions, grade, DateTimeOffset.UtcNow)) ||
+            (currentOptions.SameRarity && batch.Select(item => Read(item, "Level")).Distinct().Count() != 1) ||
+            !ids.SetEquals(MergeSlots(merge)))
+        {
+            Call(merge, "ResetParent");
+            return true;
+        }
+        mergeSummary = $"{grade}성 · " + string.Join(" / ", batch.GroupBy(item => (int)Read(item, "Level")!)
+            .Select(group => $"{RarityNames[group.Key]} {group.Count()}마리"));
+        mergePending = ids;
+        mergeDeadline = now + 30;
+        nextMerge = now + Interval;
+        message = "합성 결과 확인 중";
+        Call(merge, "Merge");
+        return true;
+    }
+
+    private void FinishMerge(object fish, int count, double now)
+    {
+        bool remaining = Enumerable.Range(0, count).Select(i => Item(fish, i))
+            .Any(item => item is not null && Read(item, "Id") is string id && mergePending!.Contains(id));
+        if (!remaining)
+        {
+            if (merge is not null && Read(merge, "viewResultFx") is object effect &&
+                Read(effect, "activeInHierarchy") is true && now < mergeDeadline)
+                return;
+            mergePending = null;
+            if (merge is not null && Read(merge, "uiFishResult") is object result && Active(result))
+                Call(result, "Confirm");
+            message = "게임에서 합성 완료 확인";
+            Record("합성 완료", mergeSummary);
+        }
+        else if (now >= mergeDeadline)
+        {
+            throw new InvalidOperationException("게임에서 합성 완료를 확인하지 못했습니다. 합성 화면을 확인하세요.");
+        }
     }
 
     private bool TryUpgrade(double now)
