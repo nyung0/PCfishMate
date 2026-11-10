@@ -22,8 +22,8 @@ from datetime import datetime
 from hashlib import file_digest
 from ctypes import wintypes
 from urllib.request import urlopen
-from ocean_ui import PANEL, RARITIES, TEXT, WATER, ocean_style
-from season_tab import GameData, SeasonTab, load_season_art
+from ocean_ui import PANEL, RARITIES, RARITY_COLORS, TEXT, WATER, ocean_style
+from season_tab import GameData, SeasonTab, load_grade_icon, load_season_art
 
 
 BRIDGE = Path(os.environ["LOCALAPPDATA"]) / "PCFishHelper" / "internal"
@@ -399,7 +399,7 @@ class Controller:
             root.iconbitmap(default=str(icon))
             root.bind("<Map>", lambda event: root.after_idle(
                 lambda: set_taskbar_icon(root, icon)) if event.widget is root else None, add="+")
-        root.geometry("820x600")
+        root.geometry("820x650")
         root.minsize(670, 410)
         root.protocol("WM_DELETE_WINDOW", self.close)
         ocean_style(root)
@@ -430,10 +430,17 @@ class Controller:
                  wraplength=560).pack(fill="x", pady=(0, 10))
         modes = ttk.Frame(panel)
         modes.pack(anchor="w", pady=(0, 6))
+
+        def divider(major=False):
+            line = tk.Frame(panel, bg=WATER if major else PANEL,
+                            height=2 if major else 1, width=1 if major else 365)
+            line.pack(anchor="w", fill="x" if major else "none", pady=(2, 4))
         self.breed_enabled = tk.BooleanVar(value=True)
-        self.upgrade_enabled = tk.BooleanVar(value=False)
+        self.upgrade_enabled = tk.BooleanVar(value=True)
         self.merge_enabled = tk.BooleanVar(value=False)
         self.same_breed = tk.BooleanVar(value=False)
+        self.same_breed_stars = tk.BooleanVar(value=False)
+        self.breed_star_flags = [tk.BooleanVar(value=True) for _ in range(6)]
         self.same_merge = tk.BooleanVar(value=True)
         self.same_merge_stars = tk.BooleanVar(value=True)
         self.merge_filters = [tk.BooleanVar(value=True) for _ in range(4)]
@@ -445,15 +452,48 @@ class Controller:
             ttk.Checkbutton(modes, text=label, variable=flag,
                             style="Ocean.TCheckbutton", command=self.update_modes).pack(side="left", padx=(0, 14))
         ttk.Button(modes, text="합성 옵션", command=self.open_merge_options).pack(side="left")
+        divider(major=True)
         ttk.Label(panel, text="교배 허용 희귀도 · 두 부모 모두 적용").pack(anchor="w", pady=(2, 4))
         grades = ttk.Frame(panel)
         grades.pack(anchor="w")
         self.flags = [tk.BooleanVar(value=True) for _ in RARITIES]
-        for grade, flag in zip(RARITIES, self.flags):
+        style = ttk.Style(root)
+        for index, (grade, flag) in enumerate(zip(RARITIES, self.flags)):
+            rarity_style = f"Rarity{index}.Ocean.TCheckbutton"
+            style.configure(rarity_style, foreground=RARITY_COLORS[index])
+            style.map(rarity_style, foreground=[("active", RARITY_COLORS[index])])
             ttk.Checkbutton(grades, text=grade, variable=flag,
-                            style="Ocean.TCheckbutton", command=self.update_modes).pack(side="left", padx=(0, 8))
-        ttk.Checkbutton(panel, text="같은 희귀도끼리만 교배", variable=self.same_breed,
-                        style="Ocean.TCheckbutton", command=self.update_modes).pack(anchor="w", pady=(5, 0))
+                            style=rarity_style, command=self.update_modes).pack(side="left", padx=(0, 8))
+        divider()
+        ttk.Label(panel, text="교배 허용 별 등급 · 두 부모 모두 적용").pack(anchor="w", pady=(5, 2))
+        stars = ttk.Frame(panel)
+        stars.pack(anchor="w")
+        try:
+            icon = load_grade_icon(game)
+        except Exception:
+            icon = None
+        self.star_images = []
+        if icon:
+            sprite = tk.PhotoImage(master=root, data=icon)
+            for count in range(1, 6):
+                width, height = sprite.width(), sprite.height()
+                strip = tk.PhotoImage(master=root, width=count * (width + 1) - 1, height=height)
+                for index in range(count):
+                    strip.tk.call(strip, "copy", sprite, "-to", index * (width + 1), 0)
+                self.star_images.append(strip)
+        for count, flag in enumerate(self.breed_star_flags):
+            label = "별 없음" if count == 0 else "★" * count
+            appearance = {"image": self.star_images[count - 1]} if count and self.star_images else {}
+            ttk.Checkbutton(stars, text=label, variable=flag, style="Ocean.TCheckbutton", **appearance,
+                            command=self.update_modes).pack(side="left", padx=(0, 8))
+        divider()
+        matching = ttk.Frame(panel)
+        matching.pack(anchor="w", pady=(5, 0))
+        for label, flag in (("같은 희귀도끼리만 교배", self.same_breed),
+                            ("같은 별 등급끼리만 교배", self.same_breed_stars)):
+            ttk.Checkbutton(matching, text=label, variable=flag, style="Ocean.TCheckbutton",
+                            command=self.update_modes).pack(side="left", padx=(0, 12))
+        divider(major=True)
         priority = ttk.Frame(panel)
         priority.pack(anchor="w", pady=(8, 0))
         ttk.Label(priority, text="교배 우선순위").pack(side="left", padx=(0, 8))
@@ -472,6 +512,7 @@ class Controller:
         self.start_button.pack(side="left", padx=4)
         ttk.Button(controls, text="중지", command=self.stop, style="Stop.TButton").pack(side="left")
         ttk.Button(controls, text="로그 보기", command=self.open_log).pack(side="left", padx=6)
+        divider(major=True)
         ttk.Label(panel, text="자동화 기록").pack(anchor="w", pady=(6, 4))
         history_panel = ttk.Frame(panel)
         history_panel.pack(fill="both", expand=True)
@@ -512,7 +553,7 @@ class Controller:
             for label, flag in zip(labels, flags):
                 ttk.Checkbutton(group, text=label, variable=flag,
                                 style="Ocean.TCheckbutton").pack(anchor="w", pady=3)
-        ttk.Label(panel, text="게임의 일반 합성에서 사용할 별 등급을 먼저 선택하세요.").pack(anchor="w", pady=6)
+        ttk.Label(panel, text="재료가 모이면 일반 합성과 별 등급을 자동으로 선택합니다.").pack(anchor="w", pady=6)
         def apply():
             for flag, value in zip(saved, draft):
                 flag.set(value.get())
@@ -532,6 +573,8 @@ class Controller:
         return {
             "Breed": self.breed_enabled.get(), "TankUpgrade": self.upgrade_enabled.get(),
             "AutoMerge": self.merge_enabled.get(), "SameBreedRarity": self.same_breed.get(),
+            "SameBreedStars": self.same_breed_stars.get(),
+            "BreedStars": [i for i, flag in enumerate(self.breed_star_flags) if flag.get()],
             "StarsFirst": self.priority.current() == 1,
             "Rarities": [i for i, flag in enumerate(self.flags) if flag.get()],
             "Merge": {"SameRarity": self.same_merge.get(), "SameStars": self.same_merge_stars.get(),

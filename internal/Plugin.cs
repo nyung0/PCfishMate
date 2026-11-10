@@ -30,6 +30,7 @@ public sealed class Plugin : BasePlugin
     private HashSet<string>? mergePending;
     private HashSet<string>? mergeFishBefore;
     private double mergeDeadline, nextMerge;
+    private double mergeSetupUntil;
     private string mergeSummary = "";
     private string mergeMessage = "";
     private static readonly string[] RarityNames = { "기본", "일반", "고급", "희귀", "전설", "신화" };
@@ -148,7 +149,8 @@ public sealed class Plugin : BasePlugin
     }
 
     private sealed record Command(string RunId, bool Enabled, int Interval, int[]? Rarities,
-        bool? Breed, bool TankUpgrade, bool StarsFirst, bool SameBreedRarity, bool AutoMerge, MergeOptions? Merge);
+        bool? Breed, bool TankUpgrade, bool StarsFirst, bool SameBreedRarity, bool AutoMerge, MergeOptions? Merge,
+        int[]? BreedStars, bool SameBreedStars);
     private sealed record MergeOptions(bool SameRarity, bool ZeroBreeds, bool ExcludePlaced,
         bool ExcludeSeason, bool ExcludeSeasonMaterials, int[]? Rarities, string[]? SeasonIds,
         string[]? SeasonMaterials, bool? SameStars);
@@ -286,14 +288,13 @@ public sealed class Plugin : BasePlugin
             return;
         }
         var candidates = Candidates(fish, count);
-        var parents = bridgeEnabled && command?.SameBreedRarity == true
-            ? candidates.GroupBy(item => item.Rarity).Select(group => group.Take(2).ToArray())
-                .FirstOrDefault(pair => pair.Length == 2) ?? Array.Empty<(string Id, int Rarity, int Stars)>()
-            : candidates.Take(2).ToArray();
-        if (parents.Length != 2)
+        bool sameRarity = bridgeEnabled && command?.SameBreedRarity == true;
+        bool sameStars = bridgeEnabled && command?.SameBreedStars == true;
+        var parents = candidates.GroupBy(item => (sameRarity ? item.Rarity : 0, sameStars ? item.Stars : 0))
+            .Select(group => group.Take(2).ToArray()).FirstOrDefault(pair => pair.Length == 2);
+        if (parents is null)
         {
-            message = bridgeEnabled && command?.SameBreedRarity == true
-                ? "교배 가능한 같은 희귀도 2마리 대기 중" : "교배 가능한 서로 다른 개체 2마리 대기 중";
+            message = "교배 조건에 맞는 부모 2마리 대기 중";
             return;
         }
         if (breed is null || !Active(breed))
@@ -336,8 +337,10 @@ public sealed class Plugin : BasePlugin
             var latest = ReadCommand();
             var allowed = latest?.Rarities;
             if (latest is null || !latest.Enabled || latest.Breed == false || allowed is null
-                || latest.RunId != bridgeRun || parents.Any(parent => !allowed.Contains(parent.Rarity))
-                || (latest.SameBreedRarity && parents[0].Rarity != parents[1].Rarity))
+                || latest.RunId != bridgeRun || parents.Any(parent => !allowed.Contains(parent.Rarity)
+                    || latest.BreedStars?.Contains(parent.Stars) == false)
+                || (latest.SameBreedRarity && parents[0].Rarity != parents[1].Rarity)
+                || (latest.SameBreedStars && parents[0].Stars != parents[1].Stars))
             {
                 Call(breed, "ResetParentFishList");
                 message = "교배 설정이 변경되어 다시 확인 중";
@@ -371,7 +374,7 @@ public sealed class Plugin : BasePlugin
             Read(item, "Level") is not int rarity || rarity is < 1 or > 5 ||
             options.Rarities?.Contains(rarity) != true ||
             Read(item, "Grade") is not int stars || stars is < 1 or > 5 ||
-            (options.SameStars != false && stars != grade) ||
+            (options.SameStars != false && grade != 0 && stars != grade) ||
             Read(item, "IsLocked") is true ||
             (options.ExcludePlaced && Read(item, "IsPlaced") is true) ||
             (options.ZeroBreeds && Read(item, "BreedCount") is not 0) ||
@@ -399,46 +402,63 @@ public sealed class Plugin : BasePlugin
     {
         if (!bridgeEnabled || command is not { AutoMerge: true, Merge: { } options } || now < nextMerge)
             return false;
-        if (merge is null || Read(merge, "mergeType")?.ToString() != "Standard"
-            || Read(merge, "grade") is not int grade || grade is < 1 or > 5)
-        {
-            mergeMessage = "게임의 일반 합성에서 별 등급을 선택하세요";
-            return false;
-        }
+        if (now < mergeSetupUntil)
+            return true;
         if (ui is null || Read(ui, "isProcessing") is not false)
             return false;
         var utc = DateTimeOffset.UtcNow;
         var candidates = Enumerable.Range(0, count).Select(i => Item(fish, i))
-            .OfType<object>().Where(item => MergeEligible(item, options, grade, utc))
+            .OfType<object>().Where(item => MergeEligible(item, options, 0, utc))
             .DistinctBy(item => (string)Read(item, "Id")!)
             .OrderBy(item => (int)Read(item, "Level")!).ToArray();
-        var groups = candidates.GroupBy(item => (int)Read(item, "Level")!).ToArray();
-        var batch = options.SameRarity
-            ? groups.FirstOrDefault(group => group.Count() >= 10)?.Take(10).ToArray()
-            : candidates.Take(10).ToArray();
+        var groups = candidates.GroupBy(item => (
+            Stars: options.SameStars != false ? (int)Read(item, "Grade")! : 0,
+            Rarity: options.SameRarity ? (int)Read(item, "Level")! : 0)).ToArray();
+        var batch = groups.FirstOrDefault(group => group.Count() >= 10)?.Take(10).ToArray();
         if (batch?.Length != 10)
         {
-            int available = options.SameRarity ? groups.Select(group => group.Count()).DefaultIfEmpty().Max()
-                                               : candidates.Length;
-            string grades = options.SameStars != false ? $"{grade}성" : "별 등급 혼합";
+            int available = groups.Select(group => group.Count()).DefaultIfEmpty().Max();
+            string grades = options.SameStars != false ? "같은 별 등급" : "별 등급 혼합";
             mergeMessage = $"{grades} 재료 {available}/10 · " +
                 (options.SameRarity ? "같은 희귀도" : "허용 희귀도 전체");
             return false;
         }
-        if (!Active(merge))
+        if (merge is null || !Active(merge))
         {
             mergeMessage = "재료 10/10 · 합성 탭 여는 중";
-            nextMerge = now + 1;
+            mergeSetupUntil = now + 1;
             if (Read(ui, "viewWindow") is object window && Read(window, "activeInHierarchy") is false)
                 Call(ui, "OpenWindow");
             Call(ui, "ChangeTabMenu", 3);
             return true;
         }
-        if (Read(merge, "viewMergeType") is object picker && Read(picker, "activeInHierarchy") is true)
-            return true;
         if (MergeSlots(merge).Length != 0)
         {
             mergeMessage = "기존 합성 슬롯이 비기를 기다리는 중";
+            return true;
+        }
+        int grade = (int)Read(batch[0], "Grade")!;
+        var pickerOpen = Read(merge, "viewMergeType") is object picker &&
+            Read(picker, "activeInHierarchy") is true;
+        if (pickerOpen || Read(merge, "mergeType")?.ToString() != "Standard" ||
+            Read(merge, "grade") is not int currentGrade || currentGrade != grade)
+        {
+            if (!pickerOpen)
+                Call(merge, "OpenMergeType");
+            var selection = Read(merge, "uiMergeType");
+            if (selection is null || !Active(selection))
+            {
+                mergeMessage = "일반 합성 설정 창을 여는 중";
+                mergeSetupUntil = now + 1;
+                return true;
+            }
+            var type = Read(selection, "mergeType")?.GetType()
+                ?? throw new InvalidOperationException("합성 유형을 확인할 수 없습니다.");
+            Write(selection, "mergeType", Enum.Parse(type, "Standard"));
+            Write(selection, "grade", grade);
+            Call(selection, "Ok");
+            mergeMessage = $"일반 합성 · {grade}성 선택 중";
+            mergeSetupUntil = now + 1;
             return true;
         }
         var ids = batch.Select(item => (string)Read(item, "Id")!).ToHashSet();
@@ -449,7 +469,7 @@ public sealed class Plugin : BasePlugin
             Call(merge, "ResetParent");
             nextMerge = now + Interval;
             mergeMessage = options.SameStars == false
-                ? "게임이 재료 조합을 거절했습니다 · 일반 합성의 별 등급을 확인하세요"
+                ? "게임이 혼합 재료 등록을 거절했습니다"
                 : "게임이 합성 재료 등록을 거절했습니다";
             return true;
         }
@@ -581,7 +601,7 @@ public sealed class Plugin : BasePlugin
                 continue;
             int rarity = (int)Read(item, "Level")!;
             int stars = (int)Read(item, "Grade")!;
-            if (!allowed.Contains(rarity))
+            if (!allowed.Contains(rarity) || (bridgeEnabled && command?.BreedStars?.Contains(stars) == false))
                 continue;
             if (rarity != 0 && (int)Read(item, "BreedCount")! <= 0)
                 continue;
@@ -612,6 +632,17 @@ public sealed class Plugin : BasePlugin
 
     private static object? Item(object list, int index) => list is Array array ? array.GetValue(index) :
         Method(list.GetType(), "get_Item", new[] { typeof(int) }).Invoke(list, new object[] { index });
+
+    private static void Write(object obj, string name, object value)
+    {
+        var type = obj.GetType();
+        var property = type.GetProperty(name, Members);
+        if (property is not null)
+            property.SetValue(obj, value);
+        else
+            (type.GetField(name, Members) ?? throw new MissingMemberException(type.FullName, name))
+                .SetValue(obj, value);
+    }
 
     private static object? Call(object obj, string name, params object[] args) =>
         Method(obj.GetType(), name, args.Select(arg => arg.GetType()).ToArray()).Invoke(obj, args);

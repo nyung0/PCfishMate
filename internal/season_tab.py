@@ -13,6 +13,16 @@ from ocean_ui import CardGrid
 from pc_fish_data import GameData
 
 
+def load_grade_icon(install):
+    assets = UnityPy.load(str(install / "PCFish_Data/sharedassets0.assets"))
+    for obj in assets.objects:
+        if obj.type.name == "Sprite" and obj.peek_name() == "Icon_Grade":
+            with BytesIO() as buffer:
+                obj.read().image.save(buffer, format="PNG")
+                return buffer.getvalue()
+    return None
+
+
 def load_season_art(game, install):
     materials = {key for recipe in game.recipes.values() for key in recipe}
     variants = {}
