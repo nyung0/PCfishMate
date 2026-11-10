@@ -17,7 +17,7 @@ jobs:
   release:
     runs-on: windows-latest
     env:
-      RELEASE_TAG: v0.4.1
+      RELEASE_TAG: v0.5.0
       DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false'
     steps:
       - uses: actions/checkout@v4
@@ -46,14 +46,14 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           $fmod = python -c "from importlib.util import find_spec; from pathlib import Path; print(Path(find_spec('fmod_toolkit').origin).parent / 'libfmod/Windows/x64/fmod.dll')"
           if (!(Test-Path -LiteralPath $fmod)) { throw 'FMOD DLL missing' }
-          python -m PyInstaller --paths . --icon internal/pcfish.ico --add-data 'internal/pcfish.ico:.' --add-data 'internal/pcfish-badge.png:.' --collect-data UnityPy --collect-data archspec --add-binary "$($fmod):fmod_toolkit/libfmod/Windows/x64" --noconfirm --onefile --windowed --name PCFishAutomation --add-data 'build/loader.zip:.' --add-data 'build/plugin/PCFishInternal.dll:.' internal/controller.py
+          python -m PyInstaller --paths . --icon internal/pcfish.ico --add-data 'internal/pcfish.ico:.' --add-data 'internal/pcfish-badge.png:.' --collect-data UnityPy --collect-data archspec --add-binary "$($fmod):fmod_toolkit/libfmod/Windows/x64" --noconfirm --onefile --windowed --name PCfish-Maker --add-data 'build/loader.zip:.' --add-data 'build/plugin/PCFishInternal.dll:.' internal/controller.py
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          $archive = python -m PyInstaller.utils.cliutils.archive_viewer --list dist/PCFishAutomation.exe
+          $archive = python -m PyInstaller.utils.cliutils.archive_viewer --list dist/PCfish-Maker.exe
           if ($LASTEXITCODE -or !($archive -match 'pcfish\.ico') -or !($archive -match 'pcfish-badge\.png')) {
             throw 'Bundled PC FISH icon assets missing'
           }
-          $hash = (Get-FileHash dist/PCFishAutomation.exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  PCFishAutomation.exe" | Set-Content dist/SHA256SUMS.txt -Encoding ascii
+          $hash = (Get-FileHash dist/PCfish-Maker.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  PCfish-Maker.exe" | Set-Content dist/SHA256SUMS.txt -Encoding ascii
       - name: Publish release
         shell: pwsh
         env:
@@ -62,16 +62,17 @@ jobs:
           $notes = @'
           PC FISH 자동 교배와 시즌 합성 재료 확인을 위한 Windows x64 설치 프로그램입니다.
 
+          PCfish Maker로 이름을 변경했습니다. 같은 희귀도 교배, 일반 합성 자동화와 결과 기록, 시즌합성 탭을 포함합니다.
           자동화 시작을 누르면 게임이 꺼져 있어도 Steam에서 실행하고 모듈 연결 후 시작합니다.
           첫 실행에서 설치 폴더와 설치 내용을 확인한 후 모듈을 설치합니다.
           교배 희귀도 체크는 실행 중에도 두 부모에 적용됩니다. 시간별 교배 및 수조 레벨업 기록을 볼 수 있습니다.
           인게임 스타일 화면과 기존 분홍색 물고기 아이콘을 적용했습니다.
 
-          1. PC FISH를 종료하고 PCFishAutomation.exe를 실행합니다.
+          1. PC FISH를 종료하고 PCfish-Maker.exe를 실행합니다.
           2. 감지된 Steam 게임 폴더와 설치 내용을 확인한 후 설치 및 실행을 누릅니다.
           3. 게임 실행을 누르고 연결되면 원하는 자동화 기능을 시작합니다.
 
           BepInEx 로더와 교배 플러그인이 포함되어 있습니다. 게임은 Steam에서 별도로 설치해야 합니다.
           BepInEx source: https://github.com/BepInEx/BepInEx/tree/dbc82f05b8ea34833de5b6a723eb60dd8398e0b1
           '@
-          gh release create $env:RELEASE_TAG dist/PCFishAutomation.exe dist/SHA256SUMS.txt --target $env:GITHUB_SHA --title 'PC FISH Automation v0.4.1' --notes "$notes"
+          gh release create $env:RELEASE_TAG dist/PCfish-Maker.exe dist/SHA256SUMS.txt --target $env:GITHUB_SHA --title 'PCfish Maker v0.5.0' --notes "$notes"

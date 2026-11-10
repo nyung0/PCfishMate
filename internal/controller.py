@@ -21,6 +21,7 @@ from season_tab import GameData, SeasonTab, load_season_art
 
 
 BRIDGE = Path(os.environ["LOCALAPPDATA"]) / "PCFishHelper" / "internal"
+APP_NAME = "PCfish Maker"
 DEFAULT_GAME = Path(r"C:\Program Files (x86)\Steam\steamapps\common\PC FISH")
 ASSETS = Path(__file__).resolve().parent
 LOADER_FILES = ("BepInEx", "dotnet", ".doorstop_version", "doorstop_config.ini", "winhttp.dll")
@@ -201,11 +202,11 @@ def setup_game(root):
         return previous
 
     wizard = tk.Toplevel(root)
-    wizard.title("PC FISH · 초기 설정")
+    wizard.title(f"{APP_NAME} · 초기 설정")
     wizard.resizable(False, False)
     panel = ttk.Frame(wizard, padding=22)
     panel.pack(fill="both", expand=True)
-    ttk.Label(panel, text="PC FISH 설치 설정", font=("Malgun Gothic", 16, "bold")).pack(anchor="w")
+    ttk.Label(panel, text=f"{APP_NAME} 설치 설정", font=("Malgun Gothic", 16, "bold")).pack(anchor="w")
     path = tk.StringVar(value=str(previous or find_game()))
     row = ttk.Frame(panel)
     row.pack(fill="x", pady=10)
@@ -307,7 +308,7 @@ class Controller:
         self.connected = False
         self.incompatible = False
         self.run_id = uuid4().hex
-        root.title("PC FISH · 바다 도감")
+        root.title(APP_NAME)
         icon = ASSETS / "pcfish.ico"
         if icon.is_file():
             root.iconbitmap(default=str(icon))
@@ -319,7 +320,7 @@ class Controller:
         ocean_style(root)
         title_bar = tk.Frame(root, bg=WATER)
         title_bar.pack(fill="x")
-        header = tk.Label(title_bar, text="PC FISH  /  바다 도감", bg=WATER, fg=TEXT,
+        header = tk.Label(title_bar, text=APP_NAME, bg=WATER, fg=TEXT,
                           font=("Malgun Gothic", 17, "bold"), anchor="w", padx=20, pady=12)
         badge = ASSETS / "pcfish-badge.png"
         if badge.is_file():
@@ -407,7 +408,7 @@ class Controller:
             self.merge_options_window.lift()
             return
         window = self.merge_options_window = tk.Toplevel(self.root)
-        window.title("PC FISH · 자동 합성 옵션")
+        window.title(f"{APP_NAME} · 자동 합성 옵션")
         window.transient(self.root)
         panel = ttk.Frame(window, padding=16)
         panel.pack(fill="both", expand=True)
@@ -458,7 +459,7 @@ class Controller:
             self.log_window.lift()
             return
         self.log_window = tk.Toplevel(self.root)
-        self.log_window.title("PC FISH · 자동화 로그")
+        self.log_window.title(f"{APP_NAME} · 자동화 로그")
         self.log_window.geometry("740x420")
         logs = ttk.Frame(self.log_window, padding=12)
         logs.pack(fill="both", expand=True)

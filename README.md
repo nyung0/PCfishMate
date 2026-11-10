@@ -1,4 +1,6 @@
-# PC FISH 보조 도구
+# PCfish Maker
+
+**[최신 Windows 릴리스 다운로드](https://github.com/nyung0/PCfish-Maker/releases/latest)**
 
 Windows와 Python 3.13에서 실행합니다. Python 기본 라이브러리와 Windows API를 사용합니다.
 
