@@ -10,18 +10,26 @@ import time
 import tkinter as tk
 import zipfile
 import winreg
+import stat
+import webbrowser
+from urllib.parse import urlsplit
+from queue import Empty, Queue
+from threading import Thread
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from uuid import uuid4
 from datetime import datetime
 from hashlib import file_digest
 from ctypes import wintypes
+from urllib.request import urlopen
 from ocean_ui import PANEL, RARITIES, TEXT, WATER, ocean_style
 from season_tab import GameData, SeasonTab, load_season_art
 
 
 BRIDGE = Path(os.environ["LOCALAPPDATA"]) / "PCFishHelper" / "internal"
 APP_NAME = "PCfishMate"
+RELEASE_PAGE = "https://github.com/nyung0/PCfishMate/releases/latest"
+RELEASE_API = "https://api.github.com/repos/nyung0/PCfishMate/releases/latest"
 DEFAULT_GAME = Path(r"C:\Program Files (x86)\Steam\steamapps\common\PC FISH")
 ASSETS = Path(__file__).resolve().parent
 LOADER_FILES = ("BepInEx", "dotnet", ".doorstop_version", "doorstop_config.ini", "winhttp.dll")
@@ -90,6 +98,75 @@ def find_game():
     return DEFAULT_GAME
 
 
+UNITY_LIBRARIES = "https://unity.bepinex.dev/libraries/"
+
+
+def unity_cache_archive(game):
+    bepinex = game / "BepInEx"
+    config = bepinex / "config" / "BepInEx.cfg"
+    directory = bepinex / "unity-libs"
+    for path in (bepinex, config.parent, config, directory):
+        if path.exists() and path.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            return None
+    if config.exists():
+        section = ""
+        for line in config.read_text(encoding="utf-8-sig").splitlines():
+            line = line.strip()
+            if line.startswith("[") and line.endswith("]"):
+                section = line[1:-1]
+            if section != "IL2CPP":
+                continue
+            key, _, value = line.partition("=")
+            defaults = {"UnityBaseLibrariesSource": UNITY_LIBRARIES + "{VERSION}.zip",
+                        "IL2CPPInteropAssembliesPath": "{BepInEx}"}
+            if key.strip() in defaults and value.strip() != defaults[key.strip()]:
+                return None
+
+    version = ctypes.windll.version
+    dll = str(game / "UnityPlayer.dll")
+    size = version.GetFileVersionInfoSizeW(dll, None)
+    info = ctypes.create_string_buffer(size)
+    data, length = ctypes.c_void_p(), wintypes.UINT()
+    if not size or not version.GetFileVersionInfoW(dll, 0, size, info) or not version.VerQueryValueW(
+            info, "\\", ctypes.byref(data), ctypes.byref(length)) or length.value < 16:
+        raise ValueError("Unity 버전을 확인할 수 없습니다.")
+    _, _, high, low = (wintypes.DWORD * 4).from_address(data.value)
+    archive = directory / f"{high >> 16}.{high & 0xffff}.{low >> 16}.zip"
+    if archive.exists() and archive.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        return None
+    return archive
+
+
+def valid_unity_archive(path):
+    try:
+        with zipfile.ZipFile(path) as archive:
+            return ("UnityEngine.CoreModule.dll" in archive.namelist() and archive.testzip() is None)
+    except (OSError, zipfile.BadZipFile, RuntimeError, NotImplementedError):
+        return False
+
+
+def repair_unity_cache(game):
+    archive = unity_cache_archive(game)
+    if archive is None or valid_unity_archive(archive):
+        return
+    archive.parent.mkdir(exist_ok=True)
+    staged = archive.with_name(f"{archive.name}.{uuid4().hex}.tmp")
+    bundled = ASSETS / archive.name
+    try:
+        if bundled.is_file():
+            shutil.copyfile(bundled, staged)
+        else:
+            with urlopen(UNITY_LIBRARIES + archive.name, timeout=20) as response, staged.open("xb") as output:
+                shutil.copyfileobj(response, output)
+        if not valid_unity_archive(staged):
+            raise ValueError("Unity 라이브러리 ZIP 검증에 실패했습니다. 잠시 후 다시 설치하세요.")
+        if archive.exists():
+            shutil.copy2(archive, archive.with_name(f"{archive.name}.{uuid4().hex}.bak"))
+        staged.replace(archive)
+    finally:
+        staged.unlink(missing_ok=True)
+
+
 def install_module(game):
     if not (game / "PCFish.exe").is_file() or not (game / "GameAssembly.dll").is_file():
         raise ValueError("PCFish.exe가 있는 게임 폴더를 선택하세요.")
@@ -111,6 +188,9 @@ def install_module(game):
                     shutil.copytree(source, destination)
                 else:
                     shutil.copy2(source, destination)
+    repair_unity_cache(game)
+    if present and ready_game(game):
+        return
     plugins = game / "BepInEx" / "plugins"
     plugins.mkdir(exist_ok=True)
     target = plugins / "PCFishInternal.dll"
@@ -140,8 +220,11 @@ def ready_game(game):
             return False
         with (ASSETS / "PCFishInternal.dll").open("rb") as source, (
                 game / "BepInEx/plugins/PCFishInternal.dll").open("rb") as installed:
-            return file_digest(source, "sha256").digest() == file_digest(installed, "sha256").digest()
-    except OSError:
+            if file_digest(source, "sha256").digest() != file_digest(installed, "sha256").digest():
+                return False
+        archive = unity_cache_archive(game)
+        return archive is None or valid_unity_archive(archive)
+    except (OSError, ValueError):
         return False
 
 
@@ -303,6 +386,8 @@ def setup_game(root):
 class Controller:
     def __init__(self, root, game):
         self.root = root
+        self.update_result = Queue()
+        self.download_result = Queue()
         self.command = None
         self.connection_deadline = None
         self.connected = False
@@ -329,6 +414,8 @@ class Controller:
         header.pack(side="left")
         ttk.Button(title_bar, text="게임 실행",
                    command=lambda: os.startfile("steam://rungameid/4842670")).pack(side="right", padx=16)
+        self.update_button = ttk.Button(title_bar, text="업데이트 확인", command=self.check_update)
+        self.update_button.pack(side="right")
         self.game_path = tk.StringVar(value=str(game))
         tabs = ttk.Notebook(root)
         tabs.pack(fill="both", expand=True, padx=12, pady=12)
@@ -454,6 +541,95 @@ class Controller:
                       "SeasonIds": season_ids, "SeasonMaterials": material_ids},
         }
 
+    def check_update(self):
+        self.update_button.state(["disabled"])
+
+        def fetch():
+            try:
+                version_file = ASSETS / "release-version.txt"
+                current = version_file.read_text(encoding="ascii").strip() if version_file.is_file() else "v0.5.1"
+                with urlopen(RELEASE_API, timeout=10) as response:
+                    release = json.load(response)
+                latest = release["tag_name"]
+                versions = []
+                for version in (current, latest):
+                    if not re.fullmatch(r"v?\d+\.\d+\.\d+", version):
+                        raise ValueError("릴리스 버전 형식을 확인할 수 없습니다.")
+                    versions.append(tuple(map(int, version.lstrip("v").split("."))))
+                asset = next((item for item in release["assets"] if item["name"] == "PCfishMate.exe"), None)
+                self.update_result.put((current, latest, versions[1] > versions[0], asset, None))
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                self.update_result.put((None, None, False, None, str(error)))
+
+        Thread(target=fetch, daemon=True).start()
+
+    def show_update_result(self):
+        try:
+            current, latest, newer, asset, error = self.update_result.get_nowait()
+        except Empty:
+            return
+        self.update_button.state(["!disabled"])
+        if error:
+            messagebox.showerror("업데이트 확인", f"GitHub 릴리스를 확인하지 못했습니다.\n{error}", parent=self.root)
+        elif newer:
+            if messagebox.askyesno("업데이트 확인", f"업데이트 내용이 있습니다. 업데이트 하시겠습니까?\n\n현재 {current} · 최신 {latest}",
+                                   parent=self.root):
+                if getattr(sys, "frozen", False):
+                    self.download_update(latest, asset)
+                else:
+                    webbrowser.open(RELEASE_PAGE)
+        else:
+            messagebox.showinfo("업데이트 확인", "최신 버전입니다", parent=self.root)
+
+    def download_update(self, tag, asset):
+        self.update_button.state(["disabled"])
+        self.status.set("업데이트 다운로드 중…")
+
+        def fetch():
+            staged = None
+            try:
+                url = f"https://github.com/nyung0/PCfishMate/releases/download/{tag}/PCfishMate.exe"
+                if not asset or asset.get("browser_download_url") != url:
+                    raise ValueError("공식 Windows 업데이트 파일을 찾을 수 없습니다.")
+                digest = asset.get("digest") or ""
+                if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+                    raise ValueError("업데이트 파일의 SHA-256을 확인할 수 없습니다.")
+                with tempfile.NamedTemporaryFile(prefix="PCfishMate-update-", suffix=".exe", delete=False) as output:
+                    staged = Path(output.name)
+                    with urlopen(url, timeout=30) as response:
+                        if urlsplit(response.url).scheme != "https":
+                            raise ValueError("업데이트 다운로드 연결을 확인할 수 없습니다.")
+                        shutil.copyfileobj(response, output)
+                with staged.open("rb") as stream:
+                    if file_digest(stream, "sha256").hexdigest() != digest[7:]:
+                        raise ValueError("업데이트 파일 검증에 실패했습니다.")
+                self.download_result.put((staged, None))
+            except (OSError, ValueError) as error:
+                if staged:
+                    staged.unlink(missing_ok=True)
+                self.download_result.put((None, str(error)))
+
+        Thread(target=fetch, daemon=True).start()
+
+    def finish_update_download(self):
+        try:
+            staged, error = self.download_result.get_nowait()
+        except Empty:
+            return
+        self.update_button.state(["!disabled"])
+        if error:
+            messagebox.showerror("업데이트 실패", error, parent=self.root)
+            return
+        try:
+            env = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1")
+            subprocess.Popen([str(staged), "--apply-update", str(os.getpid()), sys.executable], env=env)
+        except OSError as error:
+            staged.unlink(missing_ok=True)
+            messagebox.showerror("업데이트 실패", str(error), parent=self.root)
+            return
+        self.close()
+        return True
+
     def open_log(self):
         if self.log_window is not None and self.log_window.winfo_exists():
             self.log_window.lift()
@@ -463,13 +639,33 @@ class Controller:
         self.log_window.geometry("740x420")
         logs = ttk.Frame(self.log_window, padding=12)
         logs.pack(fill="both", expand=True)
-        self.log = tk.Text(logs, height=12, wrap="word", state="disabled",
+        self.log_module_version = tk.StringVar(master=logs)
+        ttk.Label(logs, textvariable=self.log_module_version).pack(anchor="w", pady=(0, 8))
+        body = ttk.Frame(logs)
+        body.pack(fill="both", expand=True)
+        self.log = tk.Text(body, height=12, wrap="word", state="disabled",
                            background=PANEL, foreground=TEXT, relief="flat")
-        scrollbar = ttk.Scrollbar(logs, command=self.log.yview)
+        scrollbar = ttk.Scrollbar(body, command=self.log.yview)
         self.log.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side="right", fill="y")
         self.log.pack(side="left", fill="both", expand=True)
         self.show_log(self.last_log)
+        self.refresh_log_version()
+
+    def refresh_log_version(self):
+        if self.log_window is None or not self.log_window.winfo_exists():
+            return
+        label = "모듈 버전 · 게임 연결 대기 중"
+        if self.connected:
+            log = Path(self.game_path.get()) / "BepInEx/LogOutput.log"
+            try:
+                with log.open("rb") as stream:
+                    startup = stream.read(131072)
+                versions = re.findall(rb"Loading \[PC Fish Internal Breeding ([^\]\r\n]+)\]", startup)
+            except OSError:
+                versions = []
+            label = "모듈 버전 · " + (versions[-1].decode("ascii", errors="replace") if versions else "확인할 수 없음")
+        self.log_module_version.set(label)
 
     def show_log(self, text):
         if self.log_window is None or not self.log_window.winfo_exists():
@@ -646,10 +842,69 @@ class Controller:
     def tick(self):
         self.tick_status()
         self.refresh_log()
+        self.refresh_log_version()
+        self.show_update_result()
+        if self.finish_update_download():
+            return
         self.root.after(1000, self.tick)
 
 
+def apply_update(parent_pid, target):
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    kernel.WaitForSingleObject.restype = wintypes.DWORD
+    kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+    parent = kernel.OpenProcess(0x00100000, False, parent_pid)
+    if parent:
+        try:
+            if kernel.WaitForSingleObject(parent, 30000) != 0:
+                raise OSError("이전 PCfishMate가 종료되지 않았습니다.")
+        finally:
+            kernel.CloseHandle(parent)
+    elif ctypes.get_last_error() != 87:
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    if target.suffix.lower() != ".exe" or not target.is_file():
+        raise ValueError("기존 PCfishMate 실행 파일을 찾을 수 없습니다.")
+    staged = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+    backup = staged.with_suffix(".bak")
+    env = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1")
+    try:
+        shutil.copyfile(sys.executable, staged)
+        shutil.copyfile(target, backup)
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                staged.replace(target)
+                break
+            except PermissionError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.2)
+        try:
+            subprocess.Popen([str(target)], env=env)
+        except OSError:
+            try:
+                backup.replace(target)
+            except OSError as error:
+                raise OSError(f"이전 버전 백업을 복원하지 못했습니다. 백업 파일: {backup}") from error
+            raise
+        else:
+            backup.unlink(missing_ok=True)
+    finally:
+        staged.unlink(missing_ok=True)
+
+
 if __name__ == "__main__":
+    if getattr(sys, "frozen", False) and len(sys.argv) == 4 and sys.argv[1] == "--apply-update":
+        try:
+            apply_update(int(sys.argv[2]), Path(sys.argv[3]))
+        except (OSError, ValueError) as error:
+            ctypes.windll.user32.MessageBoxW(None, str(error), "PCfishMate 업데이트 실패", 0x10)
+            raise SystemExit(1)
+        raise SystemExit(0)
     if len(sys.argv) == 3 and sys.argv[1] == "--check-season":
         report = Path(sys.argv[2])
         try:

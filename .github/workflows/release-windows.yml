@@ -17,7 +17,7 @@ jobs:
   release:
     runs-on: windows-latest
     env:
-      RELEASE_TAG: v0.5.1
+      RELEASE_TAG: v0.5.2
       DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false'
     steps:
       - uses: actions/checkout@v4
@@ -36,6 +36,12 @@ jobs:
           $expected = '5B63D7D0E92A2448CCD13B738FF95FF1CC1026C6D718555D4DF8E6C824953AC4'
           if ((Get-FileHash build/loader.zip -Algorithm SHA256).Hash -ne $expected) { throw 'Unexpected BepInEx archive hash' }
           Expand-Archive build/loader.zip build/loader
+      - name: Download and verify Unity base libraries
+        shell: pwsh
+        run: |
+          Invoke-WebRequest 'https://unity.bepinex.dev/libraries/6000.0.76.zip' -OutFile build/6000.0.76.zip
+          $expected = '2BA752C2CA15CDBF780B123A3F335B745F1DE14A15C3967211E1E58BED0FCFA5'
+          if ((Get-FileHash build/6000.0.76.zip -Algorithm SHA256).Hash -ne $expected) { throw 'Unexpected Unity library archive hash' }
       - name: Compile and package
         shell: pwsh
         run: |
@@ -46,7 +52,8 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           $fmod = python -c "from importlib.util import find_spec; from pathlib import Path; print(Path(find_spec('fmod_toolkit').origin).parent / 'libfmod/Windows/x64/fmod.dll')"
           if (!(Test-Path -LiteralPath $fmod)) { throw 'FMOD DLL missing' }
-          python -m PyInstaller --paths . --icon internal/pcfish.ico --add-data 'internal/pcfish.ico:.' --add-data 'internal/pcfish-badge.png:.' --collect-data UnityPy --collect-data archspec --add-binary "$($fmod):fmod_toolkit/libfmod/Windows/x64" --noconfirm --onefile --windowed --name PCfishMate --add-data 'build/loader.zip:.' --add-data 'build/plugin/PCFishInternal.dll:.' internal/controller.py
+          $env:RELEASE_TAG | Set-Content build/release-version.txt -Encoding ascii
+          python -m PyInstaller --paths . --icon internal/pcfish.ico --add-data 'internal/pcfish.ico:.' --add-data 'internal/pcfish-badge.png:.' --collect-data UnityPy --collect-data archspec --add-binary "$($fmod):fmod_toolkit/libfmod/Windows/x64" --noconfirm --onefile --windowed --name PCfishMate --add-data 'build/release-version.txt:.' --add-data 'build/6000.0.76.zip:.' --add-data 'build/loader.zip:.' --add-data 'build/plugin/PCFishInternal.dll:.' internal/controller.py
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           $archive = python -m PyInstaller.utils.cliutils.archive_viewer --list dist/PCfishMate.exe
           if ($LASTEXITCODE -or !($archive -match 'pcfish\.ico') -or !($archive -match 'pcfish-badge\.png')) {
@@ -64,6 +71,9 @@ jobs:
 
           PCfishMate로 이름을 변경했습니다. 같은 희귀도 교배, 일반 합성 자동화와 결과 기록, 시즌합성 탭을 포함합니다.
           자동화 시작을 누르면 게임이 꺼져 있어도 Steam에서 실행하고 모듈 연결 후 시작합니다.
+          업데이트 확인 버튼으로 새 버전을 내려받아 적용할 수 있습니다.
+          설치 단계에서 손상된 Unity 라이브러리 ZIP을 자동 복구합니다.
+          로그 창에 게임 모듈 버전을 표시합니다.
           첫 실행에서 설치 폴더와 설치 내용을 확인한 후 모듈을 설치합니다.
           교배 희귀도 체크는 실행 중에도 두 부모에 적용됩니다. 시간별 교배 및 수조 레벨업 기록을 볼 수 있습니다.
           인게임 스타일 화면과 기존 분홍색 물고기 아이콘을 적용했습니다.
@@ -75,4 +85,4 @@ jobs:
           BepInEx 로더와 교배 플러그인이 포함되어 있습니다. 게임은 Steam에서 별도로 설치해야 합니다.
           BepInEx source: https://github.com/BepInEx/BepInEx/tree/dbc82f05b8ea34833de5b6a723eb60dd8398e0b1
           '@
-          gh release create $env:RELEASE_TAG dist/PCfishMate.exe dist/SHA256SUMS.txt --target $env:GITHUB_SHA --title 'PCfishMate v0.5.1' --notes "$notes"
+          gh release create $env:RELEASE_TAG dist/PCfishMate.exe dist/SHA256SUMS.txt --target $env:GITHUB_SHA --title 'PCfishMate v0.5.2' --notes "$notes"
