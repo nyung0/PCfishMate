@@ -14,14 +14,17 @@ MUTED = "#B5C8E3"
 RARITY_COLORS = (MUTED, TEXT, "#8CE1A8", "#8BD9FF", "#FFD177", "#EDABFF")
 
 
-def rounded_image(root, width, height, radius, fill, outline=None):
+def rounded_image(root, width, height, radius, fill, outline=None, bevel=False):
     image = tk.PhotoImage(master=root, width=width, height=height)
+    rgb = tuple(int(fill[i:i + 2], 16) for i in (1, 3, 5))
     for y in range(height):
         edge = max(0, radius - min(y, height - 1 - y))
         inset = radius - isqrt(radius * radius - edge * edge)
         image.put(outline or fill, to=(inset, y, width - inset, y + 1))
-        if outline and 1 <= y < height - 2:
-            image.put(fill, to=(inset + 1, y, width - inset - 1, y + 1))
+        if outline and 1 <= y < height - 1:
+            shade = (24 if y == 1 else 13 if y == 2 else -23 if y >= height - 3 else 0) if bevel else 0
+            face = "#%02x%02x%02x" % tuple(max(0, min(255, channel + shade)) for channel in rgb)
+            image.put(face, to=(inset + 1, y, width - inset - 1, y + 1))
     return image
 
 
@@ -42,15 +45,15 @@ def ocean_style(root):
     style.theme_use("clam")
     style.configure(".", background=OCEAN, foreground=TEXT, font=("Malgun Gothic", 10))
     root.button_images = []
-    for name, button_style, colors in (
-        ("Ocean", "TButton", ("#285F96", "#367BB8", "#194570")),
-        ("Primary", "Primary.TButton", ("#246D57", "#338669", "#174D3D")),
-        ("Stop", "Stop.TButton", ("#9B4053", "#B34C63", "#722B3B")),
+    for name, button_style, colors, outline in (
+        ("Ocean", "TButton", ("#285F96", "#367BB8", "#194570"), "#163755"),
+        ("Primary", "Primary.TButton", ("#16892B", "#1BA637", "#116B23"), "#0A4E1B"),
+        ("Stop", "Stop.TButton", ("#DA3036", "#ED3C42", "#AE232A"), "#7B1D24"),
     ):
-        fills = [(color, EDGE) for color in colors]
+        fills = [(color, outline) for color in colors]
         fills.extend((("#263D59", "#507193"), (colors[0], ACCENT)))
         normal, hover, pressed, disabled, focused = (
-            rounded_image(root, 32, 28, 6, fill, border) for fill, border in fills)
+            rounded_image(root, 32, 28, 5, fill, border, bevel=True) for fill, border in fills)
         root.button_images.extend((normal, hover, pressed, disabled, focused))
         element = f"{name}.button"
         style.element_create(element, "image", normal, ("disabled", disabled),
@@ -61,7 +64,8 @@ def ocean_style(root):
                 ("Button.label", {"sticky": "nswe"}),
             ]}),
         ]})])
-        style.configure(button_style, padding=(13, 7), foreground=TEXT)
+        style.configure(button_style, padding=(13, 5), foreground=TEXT)
+        style.map(button_style, background=[("active", OCEAN), ("pressed", OCEAN)])
         style.map(button_style, foreground=[("disabled", MUTED)])
     for control in ("TEntry", "TSpinbox"):
         style.configure(control, fieldbackground=PANEL, insertcolor=TEXT,

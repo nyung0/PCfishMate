@@ -303,13 +303,17 @@ class Controller:
         root.minsize(670, 410)
         root.protocol("WM_DELETE_WINDOW", self.close)
         ocean_style(root)
-        header = tk.Label(root, text="PC FISH  /  바다 도감", bg=WATER, fg=TEXT,
+        title_bar = tk.Frame(root, bg=WATER)
+        title_bar.pack(fill="x")
+        header = tk.Label(title_bar, text="PC FISH  /  바다 도감", bg=WATER, fg=TEXT,
                           font=("Malgun Gothic", 17, "bold"), anchor="w", padx=20, pady=12)
         badge = ASSETS / "pcfish-badge.png"
         if badge.is_file():
             self.header_icon = tk.PhotoImage(master=root, file=str(badge))
             header.configure(image=self.header_icon, compound="left", padx=14)
-        header.pack(fill="x")
+        header.pack(side="left")
+        ttk.Button(title_bar, text="게임 실행",
+                   command=lambda: os.startfile("steam://rungameid/4842670")).pack(side="right", padx=16)
         self.game_path = tk.StringVar(value=str(game))
         tabs = ttk.Notebook(root)
         tabs.pack(fill="both", expand=True, padx=12, pady=12)
@@ -318,15 +322,10 @@ class Controller:
         season = SeasonTab(tabs, self.game_path)
         tabs.add(season, text="합성")
         tabs.bind("<<NotebookTabChanged>>", lambda _: season.refresh())
-        install = ttk.Frame(panel)
-        install.pack(fill="x", pady=(10, 0))
-        ttk.Label(install, textvariable=self.game_path).pack(side="left", fill="x", expand=True)
-        ttk.Button(install, text="게임 실행",
-                   command=lambda: os.startfile("steam://rungameid/4842670")).pack(side="left", padx=(5, 0))
-        self.module_status = tk.StringVar()
-        ttk.Label(panel, textvariable=self.module_status).pack(anchor="w", pady=(6, 0))
         self.status = tk.StringVar(value="게임 플러그인 연결 대기 중")
-        ttk.Label(panel, textvariable=self.status, wraplength=430).pack(anchor="w", pady=8)
+        tk.Label(panel, textvariable=self.status, bg=PANEL, fg=TEXT, anchor="w",
+                 font=("Malgun Gothic", 11, "bold"), padx=12, pady=8,
+                 wraplength=560).pack(fill="x", pady=(0, 10))
         modes = ttk.Frame(panel)
         modes.pack(anchor="w", pady=(0, 6))
         self.breed_enabled = tk.BooleanVar(value=True)
@@ -415,8 +414,6 @@ class Controller:
 
     def refresh_log(self):
         game = Path(self.game_path.get())
-        dll = game / "BepInEx" / "plugins" / "PCFishInternal.dll"
-        self.module_status.set("내부 모듈 설치됨" if dll.is_file() else "내부 모듈 설치 필요")
         path = game / "BepInEx" / "LogOutput.log"
         try:
             with path.open("rb") as stream:
