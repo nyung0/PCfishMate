@@ -30,6 +30,7 @@ public sealed class Plugin : BasePlugin
     private HashSet<string>? mergePending;
     private double mergeDeadline, nextMerge;
     private string mergeSummary = "";
+    private string mergeMessage = "";
     private static readonly string[] RarityNames = { "기본", "일반", "고급", "희귀", "전설", "신화" };
     private readonly HashSet<string> fishIdsBefore = new();
     private string?[] parentVariants = Array.Empty<string?>();
@@ -193,6 +194,7 @@ public sealed class Plugin : BasePlugin
             var temporary = status + ".tmp";
             File.WriteAllText(temporary, JsonSerializer.Serialize(new {
                 Version = 3, Running = enabled.Value || bridgeEnabled, Message = message,
+                MergeMessage = bridgeEnabled && command?.AutoMerge == true ? mergeMessage : "",
             }));
             File.Move(temporary, status, overwrite: true);
         }
@@ -397,8 +399,7 @@ public sealed class Plugin : BasePlugin
         if (merge is null || Read(merge, "mergeType")?.ToString() != "Standard"
             || Read(merge, "grade") is not int grade || grade is < 1 or > 5)
         {
-            if (command.Breed == false)
-                message = "게임의 일반 합성에서 별 등급을 선택하세요";
+            mergeMessage = "게임의 일반 합성에서 별 등급을 선택하세요";
             return false;
         }
         if (ui is null || Read(ui, "isProcessing") is not false)
@@ -407,19 +408,22 @@ public sealed class Plugin : BasePlugin
         var candidates = Enumerable.Range(0, count).Select(i => Item(fish, i))
             .OfType<object>().Where(item => MergeEligible(item, options, grade, utc))
             .DistinctBy(item => (string)Read(item, "Id")!)
-            .OrderBy(item => (int)Read(item, "Level")!);
+            .OrderBy(item => (int)Read(item, "Level")!).ToArray();
+        var groups = candidates.GroupBy(item => (int)Read(item, "Level")!).ToArray();
         var batch = options.SameRarity
-            ? candidates.GroupBy(item => (int)Read(item, "Level")!)
-                .Select(group => group.Take(10).ToArray()).FirstOrDefault(group => group.Length == 10)
+            ? groups.FirstOrDefault(group => group.Count() >= 10)?.Take(10).ToArray()
             : candidates.Take(10).ToArray();
         if (batch?.Length != 10)
         {
-            if (command.Breed == false)
-                message = $"합성 재료 대기 중 · {grade}성";
+            int available = options.SameRarity ? groups.Select(group => group.Count()).DefaultIfEmpty().Max()
+                                               : candidates.Length;
+            mergeMessage = $"{grade}성 재료 {available}/10 · " +
+                (options.SameRarity ? "같은 희귀도" : "허용 희귀도 전체");
             return false;
         }
         if (!Active(merge))
         {
+            mergeMessage = $"{grade}성 재료 10/10 · 합성 탭 여는 중";
             nextMerge = now + 1;
             if (Read(ui, "viewWindow") is object window && Read(window, "activeInHierarchy") is false)
                 Call(ui, "OpenWindow");
@@ -430,7 +434,7 @@ public sealed class Plugin : BasePlugin
             return true;
         if (MergeSlots(merge).Length != 0)
         {
-            message = "기존 합성 슬롯이 비기를 기다리는 중";
+            mergeMessage = "기존 합성 슬롯이 비기를 기다리는 중";
             return true;
         }
         var ids = batch.Select(item => (string)Read(item, "Id")!).ToHashSet();
@@ -440,7 +444,7 @@ public sealed class Plugin : BasePlugin
                 continue;
             Call(merge, "ResetParent");
             nextMerge = now + Interval;
-            message = "게임이 합성 재료 등록을 거절했습니다";
+            mergeMessage = "게임이 합성 재료 등록을 거절했습니다";
             return true;
         }
         var latest = ReadCommand();
@@ -459,6 +463,7 @@ public sealed class Plugin : BasePlugin
         mergeDeadline = now + 30;
         nextMerge = now + Interval;
         message = "합성 결과 확인 중";
+        mergeMessage = message;
         Call(merge, "Merge");
         return true;
     }
@@ -476,6 +481,7 @@ public sealed class Plugin : BasePlugin
             if (merge is not null && Read(merge, "uiFishResult") is object result && Active(result))
                 Call(result, "Confirm");
             message = "게임에서 합성 완료 확인";
+            mergeMessage = message;
             Record("합성 완료", mergeSummary);
         }
         else if (now >= mergeDeadline)

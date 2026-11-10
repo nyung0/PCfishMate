@@ -407,21 +407,33 @@ class Controller:
             return
         window = self.merge_options_window = tk.Toplevel(self.root)
         window.title("PC FISH · 자동 합성 옵션")
+        window.transient(self.root)
         panel = ttk.Frame(window, padding=16)
         panel.pack(fill="both", expand=True)
+        saved = [*self.merge_filters, *self.merge_rarities, self.same_merge]
+        draft = [tk.BooleanVar(window, value=flag.get()) for flag in saved]
         for heading, labels, flags in (
             ("자동 등록 조건", ("남은 교배 횟수가 0인 물고기만 등록", "수조에 배치된 물고기는 제외",
-                              "시즌 물고기는 제외", "시즌 물고기 재료는 제외"), self.merge_filters),
-            ("종 희귀도 조건", RARITIES[1:], self.merge_rarities),
-            ("재료 조합", ("같은 희귀도 10마리만 합성",), (self.same_merge,)),
+                              "시즌 물고기는 제외", "시즌 물고기 재료는 제외"), draft[:4]),
+            ("종 희귀도 조건", RARITIES[1:], draft[4:9]),
+            ("재료 조합", ("같은 희귀도 10마리만 합성",), draft[9:]),
         ):
             group = ttk.LabelFrame(panel, text=heading, padding=8)
             group.pack(fill="x", pady=4)
             for label, flag in zip(labels, flags):
-                ttk.Checkbutton(group, text=label, variable=flag, style="Ocean.TCheckbutton",
-                                command=self.update_modes).pack(anchor="w", pady=3)
+                ttk.Checkbutton(group, text=label, variable=flag,
+                                style="Ocean.TCheckbutton").pack(anchor="w", pady=3)
         ttk.Label(panel, text="게임의 일반 합성에서 사용할 별 등급을 먼저 선택하세요.").pack(anchor="w", pady=6)
-        ttk.Button(panel, text="확인", command=window.destroy).pack(anchor="e")
+        def apply():
+            for flag, value in zip(saved, draft):
+                flag.set(value.get())
+            self.update_modes()
+            window.destroy()
+
+        buttons = ttk.Frame(panel)
+        buttons.pack(anchor="e")
+        ttk.Button(buttons, text="취소", command=window.destroy).pack(side="left", padx=6)
+        ttk.Button(buttons, text="확인", command=apply, style="Primary.TButton").pack(side="left")
 
     def mode_settings(self):
         zero, placed, season, materials = (flag.get() for flag in self.merge_filters)
@@ -598,7 +610,10 @@ class Controller:
             connected = time.time() - path.stat().st_mtime < 5
             if connected:
                 state = json.loads(path.read_text(encoding="utf-8"))
-                self.status.set(("실행 중 · " if state["Running"] else "") + state["Message"])
+                status = ("실행 중 · " if state["Running"] else "") + state["Message"]
+                if state.get("MergeMessage"):
+                    status += "\n합성 · " + state["MergeMessage"]
+                self.status.set(status)
                 connected = state.get("Version") == 3
                 if not connected:
                     self.incompatible = True
