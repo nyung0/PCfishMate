@@ -28,6 +28,7 @@ public sealed class Plugin : BasePlugin
     private double upgradeDeadline;
     private bool upgradePopup;
     private HashSet<string>? mergePending;
+    private HashSet<string>? mergeFishBefore;
     private double mergeDeadline, nextMerge;
     private string mergeSummary = "";
     private string mergeMessage = "";
@@ -141,6 +142,7 @@ public sealed class Plugin : BasePlugin
             plugin.upgradeFrom = null;
             plugin.upgradePopup = false;
             plugin.mergePending = null;
+            plugin.mergeFishBefore = null;
             plugin.Record("오류", plugin.message);
         }
     }
@@ -466,6 +468,8 @@ public sealed class Plugin : BasePlugin
             .OrderBy(group => group.Key.Stars).ThenBy(group => group.Key.Rarity)
             .Select(group => $"{group.Key.Stars}성 {RarityNames[group.Key.Rarity]} {group.Count()}마리"));
         mergePending = ids;
+        mergeFishBefore = Enumerable.Range(0, count).Select(i => Item(fish, i))
+            .OfType<object>().Select(item => Read(item, "Id")).OfType<string>().ToHashSet();
         mergeDeadline = now + 30;
         nextMerge = now + Interval;
         message = "합성 결과 확인 중";
@@ -483,12 +487,27 @@ public sealed class Plugin : BasePlugin
             if (merge is not null && Read(merge, "viewResultFx") is object effect &&
                 Read(effect, "activeInHierarchy") is true && now < mergeDeadline)
                 return;
+            var result = merge is not null ? Read(merge, "uiFishResult") : null;
+            bool resultOpen = result is not null && Active(result);
+            string? child = resultOpen && Read(result!, "fish") is object resultFish
+                ? Read(resultFish, "Fish") as string : null;
+            if (child is null && mergeFishBefore is not null)
+            {
+                var added = Enumerable.Range(0, count).Select(i => Item(fish, i))
+                    .OfType<object>().Where(item => Read(item, "Id") is string id && !mergeFishBefore.Contains(id))
+                    .Take(2).ToArray();
+                if (added.Length == 1)
+                    child = Read(added[0], "Fish") as string;
+            }
+            if (child is null && now < mergeDeadline)
+                return;
             mergePending = null;
-            if (merge is not null && Read(merge, "uiFishResult") is object result && Active(result))
-                Call(result, "Confirm");
+            mergeFishBefore = null;
+            if (resultOpen)
+                Call(result!, "Confirm");
             message = "게임에서 합성 완료 확인";
             mergeMessage = message;
-            Record("합성 완료", mergeSummary);
+            Record("합성 완료", mergeSummary, child: child);
         }
         else if (now >= mergeDeadline)
         {

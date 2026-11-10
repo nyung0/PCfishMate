@@ -533,6 +533,8 @@ class Controller:
                 if kind == "교배 완료":
                     first, second = map(self.fish_label, event["Parents"])
                     detail = f"{first} + {second} → {self.fish_label(event['Child'])}"
+                elif kind == "합성 완료" and "Child" in event:
+                    detail = f"{detail} → {self.fish_label(event['Child'])}"
             except (KeyError, TypeError, ValueError):
                 continue
             self.history.insert("", "end", values=(stamp, kind, detail))
