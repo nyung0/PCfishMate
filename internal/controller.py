@@ -21,7 +21,7 @@ from season_tab import GameData, SeasonTab, load_season_art
 
 
 BRIDGE = Path(os.environ["LOCALAPPDATA"]) / "PCFishHelper" / "internal"
-APP_NAME = "PCfish Maker"
+APP_NAME = "PCfishMate"
 DEFAULT_GAME = Path(r"C:\Program Files (x86)\Steam\steamapps\common\PC FISH")
 ASSETS = Path(__file__).resolve().parent
 LOADER_FILES = ("BepInEx", "dotnet", ".doorstop_version", "doorstop_config.ini", "winhttp.dll")

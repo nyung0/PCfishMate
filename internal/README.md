@@ -1,10 +1,10 @@
-# PCfish Maker 설치 및 내부 모듈
+# PCfishMate 설치 및 내부 모듈
 
 PC FISH Windows x64 IL2CPP용 BepInEx 플러그인입니다. 게임의 메인 스레드에서 현재 하트와 물고기 목록을 읽고, 게임의 `UIBreed.SetParent`와 `UIBreed.Breed`를 호출합니다. 게임이 결과를 반영하면 다음 주기를 기다립니다.
 
 ## 설치 및 사용
 
-**PCfish-Maker.exe**에 로더와 플러그인이 포함되어 있습니다.
+**PCfishMate.exe**에 로더와 플러그인이 포함되어 있습니다.
 
 1. PC FISH를 종료하고 EXE를 실행합니다.
 2. 초기 설정 창에서 자동 감지된 Steam 게임 폴더를 확인하거나 **폴더 선택**으로 변경합니다. 설치 내용을 읽고 동의한 뒤 **설치 및 실행**을 누릅니다.
@@ -23,7 +23,7 @@ PC FISH Windows x64 IL2CPP용 BepInEx 플러그인입니다. 게임의 메인 �
 
 1. [BepInEx IL2CPP 설치 안내](https://docs.bepinex.dev/master/articles/user_guide/installation/unity_il2cpp.html)에 따라 PC FISH 설치 폴더에 BepInEx 6 Windows x64 IL2CPP를 설치합니다. 현재 게임에서는 메타데이터 버전 31을 지원하는 6.0.0-be.793으로 검증했습니다.
 2. `PCFishInternal.dll`을 게임 설치 폴더 아래 `BepInEx/plugins`에 복사한 뒤 게임을 시작합니다.
-3. 컨트롤러 `PCfish-Maker.exe`를 실행합니다. 허용 희귀도와 간격을 정한 후 **자동화 시작**을 누릅니다. 기본 간격은 10초입니다.
+3. 컨트롤러 `PCfishMate.exe`를 실행합니다. 허용 희귀도와 간격을 정한 후 **자동화 시작**을 누릅니다. 기본 간격은 10초입니다.
 4. 컨트롤러의 **중지**나 **F8**로 정지합니다. 컨트롤러를 닫거나 연결이 끊기면 컨트롤러에서 시작한 자동화는 중지됩니다.
 
 남은 교배 횟수가 있는 개체와 횟수 제한이 없는 기본 개체를 대상으로, 잠금·쿨다운 상태를 제외한 뒤 희귀도와 별 등급이 높은 순으로 고릅니다. 두 부모의 개체 ID는 서로 달라야 합니다.
