@@ -102,7 +102,7 @@ class CatalogTab(ttk.Frame):
                 self.favorites = set()
                 if not all(isinstance(error, FileNotFoundError) for error in (primary_error, backup_error)):
                     self.favorites_status.set("저장된 즐겨찾기를 읽지 못했어요.")
-        self.visible_variants = []
+        self.visible_groups = []
 
         filters = ttk.Frame(self)
         filters.pack(fill="x")
@@ -126,6 +126,13 @@ class CatalogTab(ttk.Frame):
         self.sort.bind("<<ComboboxSelected>>", lambda _: self.draw())
         ttk.Checkbutton(controls, text="즐겨찾기만", style="Ocean.TCheckbutton",
                         variable=self.favorites_only, command=self.draw).pack(side="left", padx=12)
+        search = ttk.Frame(self)
+        search.pack(fill="x", pady=(0, 6))
+        ttk.Label(search, text="이름 검색").pack(side="left", padx=(0, 8))
+        self.query = tk.StringVar()
+        ttk.Entry(search, textvariable=self.query).pack(side="left", fill="x", expand=True)
+        ttk.Button(search, text="지우기", command=lambda: self.query.set("")).pack(side="left", padx=(6, 0))
+        self.query.trace_add("write", lambda *_: self.draw())
         self.summary = tk.StringVar(value="도감 데이터를 읽는 중…")
         ttk.Label(self, textvariable=self.summary).pack(anchor="w", pady=(0, 6))
         self.favorites_notice = ttk.Label(self, textvariable=self.favorites_status)
@@ -142,11 +149,12 @@ class CatalogTab(ttk.Frame):
             self.favorites_notice.pack_forget()
 
     def toggle_favorite(self, index):
-        if not 0 <= index < len(self.visible_variants):
+        if not 0 <= index < len(self.visible_groups):
             return
-        variant = self.visible_variants[index]
-        updated = self.favorites ^ {variant}
-        self.favorites_pending[variant] = variant in updated
+        variants = set(self.visible_groups[index])
+        marked = not bool(variants & self.favorites)
+        updated = self.favorites | variants if marked else self.favorites - variants
+        self.favorites_pending.update(dict.fromkeys(variants, marked))
         try:
             try:
                 stored = read_favorites(self.favorites_path)
@@ -236,34 +244,44 @@ class CatalogTab(ttk.Frame):
         if self.stock is None:
             return
         discovered, totals = self.stock
-        options = self.rarity, self.sort.current(), self.favorites_only.get()
+        query = "".join(self.query.get().casefold().split())
+        options = self.rarity, self.sort.current(), self.favorites_only.get(), query
         view = options, self.stock, self.favorites, self.stock_available
         if view == self.view:
             return
         reset = self.view is None or options != self.view[0]
         self.view = view
         order = SORT_ORDERS[options[1]]
-        entries = [
-            (self.game.names.get(species, species), rarity, stars, variant)
-            for variant, (species, rarity, stars) in self.game.variants.items()
-            if 1 <= rarity < len(RARITIES) and (self.rarity is None or rarity == self.rarity)
-            and (not options[2] or variant in self.favorites)
-        ]
+        groups = defaultdict(list)
+        for variant, (species, rarity, stars) in sorted(self.game.variants.items()):
+            groups[species, rarity, stars].append(variant)
+        entries = []
+        for (species, rarity, stars), variants in groups.items():
+            name = self.game.names.get(species, species)
+            if (1 <= rarity < len(RARITIES) and (self.rarity is None or rarity == self.rarity)
+                    and (not options[2] or any(variant in self.favorites for variant in variants))
+                    and query in "".join(name.casefold().split())):
+                entries.append((name, rarity, stars, species, variants))
         entries.sort(key=lambda entry: tuple(entry[field] for field in order) + (entry[3],))
         cards = []
-        for name, rarity, stars, variant in entries:
-            found = variant in discovered
-            count, remaining, maximum = totals.get(variant, (0, 0, 0))
+        found_count = owned_count = 0
+        for name, rarity, stars, _, variants in entries:
+            found = any(variant in discovered for variant in variants)
+            count, remaining, maximum = map(sum, zip(*(totals.get(variant, (0, 0, 0)) for variant in variants)))
+            found_count += found
+            owned_count += count
             detail = f"×{count} · 교배 {remaining}/{maximum}" if count else "보유 없음" if found else "미발견"
             if not self.stock_available:
                 detail = "보유 정보 확인 불가"
-            cards.append((name, rarity, stars, detail, self.images.get((variant, found)), found))
-        found_count = sum(variant in discovered for _, _, _, variant in entries)
-        owned_count = sum(totals.get(variant, (0,))[0] for _, _, _, variant in entries)
-        self.visible_variants = [variant for _, _, _, variant in entries]
-        summary = f"발견한 변종 {found_count}/{len(entries)}종 · 현재 보유 {owned_count}마리"
+            picture = next((self.images[variant, found] for variant in variants if (variant, found) in self.images), None)
+            cards.append((name, rarity, stars, detail, picture, found))
+        self.visible_groups = [entry[4] for entry in entries]
+        summary = f"발견 {found_count}/{len(entries)}개 · 현재 보유 {owned_count}마리"
         if not self.stock_available:
-            summary = f"변종 {len(entries)}종 · 게임 저장 데이터를 읽을 수 없어요."
+            summary = f"도감 {len(entries)}개 · 게임 저장 데이터를 읽을 수 없어요."
+        if query and not entries:
+            summary = "검색 조건에 맞는 물고기가 없어요."
         self.summary.set("표시할 즐겨찾기가 없어요." if options[2] and not entries else summary)
         self.grid_view.set_cards(cards, reset,
-                                 favorites=[variant in self.favorites for variant in self.visible_variants])
+                                 favorites=[any(variant in self.favorites for variant in variants)
+                                            for variants in self.visible_groups])

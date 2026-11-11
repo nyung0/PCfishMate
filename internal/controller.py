@@ -28,7 +28,7 @@ from PIL import ImageTk
 if not getattr(sys, "frozen", False):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from catalog_tab import CatalogTab
+from catalog_tab import CatalogTab, catalog_art
 from favorite_notifications import APP_ID, DEFAULT_NOTIFICATION_SETTINGS, flash_taskbar, notify_favorites
 from ocean_ui import OCEAN, PANEL, RARITIES, RARITY_COLORS, TEXT, WATER, ocean_style
 from season_tab import GameData, SeasonTab, load_grade_icon, load_install_fish, load_season_art
@@ -1146,6 +1146,9 @@ def apply_update(parent_pid, target):
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--check-image-runtime"]:
+        from UnityPy.export import SpriteHelper
+        raise SystemExit(0 if callable(SpriteHelper.get_image_from_sprite) else 1)
     if getattr(sys, "frozen", False) and len(sys.argv) == 4 and sys.argv[1] == "--apply-update":
         try:
             apply_update(int(sys.argv[2]), Path(sys.argv[3]))
@@ -1160,8 +1163,12 @@ if __name__ == "__main__":
             game = GameData(install=game_path)
             rows, _ = game.rows()
             variants, images = load_season_art(game, game_path)
+            catalog_images = catalog_art(game_path, game.variants)
+            if not images or not catalog_images:
+                raise ValueError("시즌 또는 도감 이미지를 읽지 못했습니다.")
             result = {"recipes": len(game.recipes), "owned": sum(row[3] for row in rows),
-                      "variants": len(variants), "images": len(images)}
+                      "variants": len(variants), "images": len(images),
+                      "catalog_images": len(catalog_images)}
         except Exception as error:
             report.write_text(str(error), encoding="utf-8")
             raise SystemExit(1)

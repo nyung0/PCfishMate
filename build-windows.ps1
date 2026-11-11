@@ -1,5 +1,6 @@
 # Requires PowerShell 7, Python 3.12 x64, and the .NET 6 SDK.
 $ErrorActionPreference = 'Stop'
+$previousPythonPath = $env:PYTHONPATH
 Push-Location $PSScriptRoot
 try {
     New-Item -ItemType Directory -Path build -Force | Out-Null
@@ -15,19 +16,29 @@ try {
     $core = (Resolve-Path build/loader/BepInEx/core).Path
     dotnet build internal/PCFishInternal.csproj -c Release "-p:BepInExCore=$core" -o build/plugin
     if ($LASTEXITCODE) { exit $LASTEXITCODE }
-    python -m pip install pyinstaller==6.22.3 UnityPy==1.25.4
+    python -m pip install --upgrade --target build/python pyinstaller==6.22.3 UnityPy==1.25.4
     if ($LASTEXITCODE) { exit $LASTEXITCODE }
-    $fmod = python -c "from importlib.util import find_spec; from pathlib import Path; print(Path(find_spec('fmod_toolkit').origin).parent / 'libfmod/Windows/x64/fmod.dll')"
-    if (!(Test-Path -LiteralPath $fmod)) { throw 'FMOD DLL missing' }
-    python -m PyInstaller --paths . --icon internal/pcfish.ico --add-data 'internal/pcfish.ico:.' --add-data 'internal/pcfish-badge.png:.' --collect-data UnityPy --collect-data archspec --add-binary "$($fmod):fmod_toolkit/libfmod/Windows/x64" --noconfirm --onefile --windowed --name PCfishMate --add-data 'internal/release-version.txt:.' --add-data 'build/6000.0.76.zip:.' --add-data 'build/loader.zip:.' --add-data 'build/plugin/PCFishInternal.dll:.' internal/controller.py
+    $env:PYTHONPATH = (Resolve-Path build/python).Path
+    # Sprite.image imports UnityPy.export, which eagerly imports the audio converter.
+    # PCfishMate only reads images, so leave that converter unloaded in the bundled copy.
+    $exports = 'build/python/UnityPy/export/__init__.py'
+    $source = Get-Content $exports -Raw
+    if ($source -notmatch '(?m)^    AudioClipConverter,\r?$') { throw 'Unexpected UnityPy export layout' }
+    $source -replace '(?m)^    (AudioClipConverter|"AudioClipConverter"),\r?\n', '' |
+        Set-Content $exports -Encoding utf8NoBOM
+    python -m PyInstaller --paths . --icon internal/pcfish.ico --add-data 'internal/pcfish.ico:.' --add-data 'internal/pcfish-badge.png:.' --collect-data UnityPy --collect-data archspec --exclude-module fmod_toolkit --exclude-module pyfmodex --noconfirm --onefile --windowed --name PCfishMate --add-data 'internal/release-version.txt:.' --add-data 'build/6000.0.76.zip:.' --add-data 'build/loader.zip:.' --add-data 'build/plugin/PCFishInternal.dll:.' internal/controller.py
     if ($LASTEXITCODE) { exit $LASTEXITCODE }
     $archive = python -m PyInstaller.utils.cliutils.archive_viewer --list dist/PCfishMate.exe
     if ($LASTEXITCODE -or !($archive -match 'pcfish\.ico') -or !($archive -match 'pcfish-badge\.png') -or !($archive -match 'release-version\.txt')) {
       throw 'Bundled app resources missing'
     }
+    $exe = (Resolve-Path dist/PCfishMate.exe).Path
+    $check = Start-Process -FilePath $exe -ArgumentList '--check-image-runtime' -WindowStyle Hidden -Wait -PassThru
+    if ($check.ExitCode -ne 0) { throw "Packaged image runtime check failed ($($check.ExitCode))" }
     $hash = (Get-FileHash dist/PCfishMate.exe -Algorithm SHA256).Hash.ToLowerInvariant()
     "$hash  PCfishMate.exe" | Set-Content dist/SHA256SUMS.txt -Encoding ascii
 }
 finally {
+    $env:PYTHONPATH = $previousPythonPath
     Pop-Location
 }
