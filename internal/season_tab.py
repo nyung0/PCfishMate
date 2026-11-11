@@ -23,6 +23,21 @@ def load_grade_icon(install):
     return None
 
 
+def load_install_fish(install):
+    assets = UnityPy.load(str(install / "PCFish_Data/sharedassets0.assets"))
+    for obj in assets.objects:
+        if obj.type.name == "Sprite" and obj.peek_name() == "FS00025_04_01_01":
+            # The original Coral Clownfish sprite faces left.
+            fish = obj.read().image.convert("RGBA")
+            bounds = fish.getbbox()
+            if bounds:
+                fish = ImageOps.mirror(fish.crop(bounds))
+                fish.thumbnail((32, 24), Image.Resampling.NEAREST)
+                return fish
+            break
+    return None
+
+
 def load_season_art(game, install):
     materials = {key for recipe in game.recipes.values() for key in recipe}
     variants = {}

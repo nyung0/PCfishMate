@@ -3,6 +3,7 @@ import os
 import ctypes
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,7 @@ import zipfile
 import winreg
 import stat
 import webbrowser
+from collections import Counter
 from urllib.parse import urlsplit
 from queue import Empty, Queue
 from threading import Thread
@@ -22,17 +24,22 @@ from datetime import datetime
 from hashlib import file_digest
 from ctypes import wintypes
 from urllib.request import urlopen
+from PIL import ImageTk
 if not getattr(sys, "frozen", False):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ocean_ui import PANEL, RARITIES, RARITY_COLORS, TEXT, WATER, ocean_style
-from season_tab import GameData, SeasonTab, load_grade_icon, load_season_art
+from catalog_tab import CatalogTab
+from favorite_notifications import APP_ID, DEFAULT_NOTIFICATION_SETTINGS, flash_taskbar, notify_favorites
+from ocean_ui import OCEAN, PANEL, RARITIES, RARITY_COLORS, TEXT, WATER, ocean_style
+from season_tab import GameData, SeasonTab, load_grade_icon, load_install_fish, load_season_art
 
 
 BRIDGE = Path(os.environ["LOCALAPPDATA"]) / "PCFishHelper" / "internal"
 APP_NAME = "PCfishMate"
 RELEASE_PAGE = "https://github.com/nyung0/PCfishMate/releases/latest"
 RELEASE_API = "https://api.github.com/repos/nyung0/PCfishMate/releases/latest"
+STEAM_TERMS = "https://store.steampowered.com/subscriber_agreement/#4"
+INSTALL_NOTICE_VERSION = 1
 DEFAULT_GAME = Path(r"C:\Program Files (x86)\Steam\steamapps\common\PC FISH")
 ASSETS = Path(__file__).resolve().parent
 LOADER_FILES = ("BepInEx", "dotnet", ".doorstop_version", "doorstop_config.ini", "winhttp.dll")
@@ -179,7 +186,7 @@ def installer_asset(name):
     return ASSETS / name
 
 
-def install_module(game):
+def install_module(game, report=lambda step: None):
     if not (game / "PCFish.exe").is_file() or not (game / "GameAssembly.dll").is_file():
         raise ValueError("PCFish.exe가 있는 게임 폴더를 선택하세요.")
     processes = subprocess.check_output(["tasklist", "/FI", "IMAGENAME eq PCFish.exe", "/NH"],
@@ -189,6 +196,7 @@ def install_module(game):
     present = [name for name in LOADER_FILES if (game / name).exists()]
     if present and len(present) != len(LOADER_FILES):
         raise ValueError("기존 로더 파일 일부가 남아 있어 설치를 중지했습니다.")
+    report(20)
     if not present:
         with tempfile.TemporaryDirectory() as folder:
             with zipfile.ZipFile(installer_asset("loader.zip")) as archive:
@@ -200,7 +208,9 @@ def install_module(game):
                     shutil.copytree(source, destination)
                 else:
                     shutil.copy2(source, destination)
+    report(50)
     repair_unity_cache(game)
+    report(70)
     if present and ready_game(game):
         return
     plugins = game / "BepInEx" / "plugins"
@@ -212,6 +222,7 @@ def install_module(game):
         staged.replace(target)
     finally:
         staged.unlink(missing_ok=True)
+    report(90)
     config = game / "BepInEx" / "config" / "BepInEx.cfg"
     config.parent.mkdir(exist_ok=True)
     if config.exists():
@@ -262,8 +273,9 @@ class ShellExecuteInfo(ctypes.Structure):
     ]
 
 
-def elevated_install(game):
+def elevated_install(game, progress_address):
     args = ["--install-module", str(game)]
+    args.extend((str(progress_address[0]), progress_address[1]))
     if not getattr(sys, "frozen", False):
         args.insert(0, str(Path(__file__).resolve()))
     info = ShellExecuteInfo(size=ctypes.sizeof(ShellExecuteInfo), mask=0x40,
@@ -289,11 +301,14 @@ def elevated_install(game):
 
 def setup_game(root):
     settings = BRIDGE / "setup.json"
+    accepted = False
     try:
-        previous = Path(json.loads(settings.read_text(encoding="utf-8"))["Game"])
+        saved = json.loads(settings.read_text(encoding="utf-8"))
+        previous = Path(saved["Game"])
+        accepted = saved.get("InstallNoticeVersion") == INSTALL_NOTICE_VERSION
     except (OSError, ValueError, KeyError, TypeError):
         previous = None
-    if previous is not None and ready_game(previous):
+    if accepted and previous is not None and ready_game(previous):
         return previous
 
     wizard = tk.Toplevel(root)
@@ -313,14 +328,58 @@ def setup_game(root):
             path.set(chosen)
 
     ttk.Button(row, text="폴더 선택", command=pick).pack(side="left", padx=(8, 0))
-    ttk.Label(panel, wraplength=475, text=(
-        "선택한 Steam 게임 폴더에 BepInEx 로더와 PC FISH 자동화 모듈을 설치하거나 갱신합니다. "
-        "게임을 종료한 뒤 진행해 주세요. Windows 관리자 권한이 필요할 수 있습니다."
-    )).pack(anchor="w", pady=12)
+    notices = (
+        "PCfishMate는 비공식 도구입니다. Steam 약관 제4조는 게임 진행이나 보상을 얻는 자동화를 금지하며, 위반 시 계정이나 구독이 제한될 수 있습니다. 아래 확인은 Valve나 게임사의 허가를 대신하지 않습니다.",
+        "게임을 종료한 뒤 진행해 주세요. 설치·갱신 시 선택한 게임 폴더에 BepInEx와 모듈을 설치하고, 필요한 경우 로더 설정과 Unity 캐시를 변경합니다. Windows 관리자 권한과 라이브러리 다운로드가 필요할 수 있습니다.",
+        "자동화는 게임에서 교배·수조 레벨업·합성을 실행합니다. 합성은 재료 물고기를 소비할 수 있으니 시작 전에 조건을 확인하세요.",
+        "도감은 게임 파일과 저장 데이터를 로컬에서 읽습니다. 즐겨찾기·설정·자동화 기록은 이 PC에 저장됩니다. Windows 알림을 켜면 시작 메뉴 바로가기와 알림 발신자가 등록될 수 있습니다. 업데이트 확인은 GitHub에 접속합니다.",
+    )
+    for notice in notices:
+        ttk.Label(panel, text=notice, wraplength=510, justify="left").pack(anchor="w", pady=(0, 7))
+    ttk.Button(panel, text="Steam 이용 약관 제4조 보기",
+               command=lambda: webbrowser.open(STEAM_TERMS)).pack(anchor="w", pady=(0, 8))
     consent = tk.BooleanVar()
-    ttk.Checkbutton(panel, text="위 설치 내용에 동의합니다.", variable=consent).pack(anchor="w")
+    ttk.Checkbutton(panel, text="안내를 확인했고 모듈 설치·갱신에 동의합니다.",
+                    variable=consent).pack(anchor="w")
     status = tk.StringVar()
     ttk.Label(panel, textvariable=status, wraplength=475).pack(anchor="w", pady=8)
+    progress = tk.Canvas(panel, height=30, highlightthickness=0, bg=panel.winfo_toplevel().cget("bg"))
+    progress_value = 0
+    progress_fish = None
+    progress_socket = None
+    progress_token = ""
+    stages = {
+        0: "게임 폴더 확인 중…",
+        20: "BepInEx 로더 준비 중…",
+        50: "Unity 라이브러리 확인 중…",
+        70: "게임 모듈 적용 중…",
+        90: "설치 설정 마무리 중…",
+        100: "설치 완료",
+    }
+
+    def draw_progress(_event=None):
+        progress.delete("all")
+        width = max(progress.winfo_width(), 40)
+        x = 17 + (width - 34) * progress_value / 100
+        progress.create_rectangle(2, 6, width - 2, 24, fill="#CDE7F2", outline="#96B8CC")
+        progress.create_rectangle(3, 7, x, 23, fill="#2786AE", width=0)
+        progress.create_line(3, 9, x, 9, fill="#64C3E0", width=2)
+        if progress_fish is not None:
+            progress.create_image(x, 15, image=progress_fish)
+        else:
+            progress.create_polygon(x - 4, 15, x - 14, 8, x - 14, 22,
+                                    fill="#FFB35C", outline="#814523")
+            progress.create_oval(x - 8, 7, x + 14, 23, fill="#FF9A45", outline="#814523")
+            progress.create_line(x - 1, 8, x - 1, 22, fill="#FFF0D3", width=3)
+            progress.create_oval(x + 6, 11, x + 9, 14, fill="#23344C", width=0)
+
+    def set_progress(value):
+        nonlocal progress_value
+        progress_value = max(progress_value, value)
+        status.set(f"{stages[progress_value]}  {progress_value}%")
+        draw_progress()
+
+    progress.bind("<Configure>", draw_progress)
     buttons = ttk.Frame(panel)
     buttons.pack(anchor="e")
     result = None
@@ -335,7 +394,9 @@ def setup_game(root):
         try:
             settings.parent.mkdir(parents=True, exist_ok=True)
             temporary = settings.with_name(f"setup-{uuid4().hex}.tmp")
-            temporary.write_text(json.dumps({"Game": str(game)}), encoding="utf-8")
+            temporary.write_text(json.dumps({
+                "Game": str(game), "InstallNoticeVersion": INSTALL_NOTICE_VERSION,
+            }), encoding="utf-8")
             temporary.replace(settings)
         except OSError as error:
             status.set(f"설치 설정 저장 실패 · {error}")
@@ -343,15 +404,38 @@ def setup_game(root):
         result = game
         wizard.destroy()
 
-    def poll(game):
-        nonlocal handle
+    def load_fish(game, images):
+        try:
+            image = load_install_fish(game)
+        except Exception:
+            return  # Game artwork is optional during installation.
+        if image is not None:
+            images.put(image)
+
+    def poll(game, images):
+        nonlocal handle, progress_socket, progress_fish
+        try:
+            image = images.get_nowait()
+        except Empty:
+            pass
+        else:
+            progress_fish = ImageTk.PhotoImage(image, master=wizard)
+            draw_progress()
+        while True:
+            try:
+                packet = progress_socket.recv(128).decode("ascii", errors="replace")
+            except BlockingIOError:
+                break
+            token, _, step = packet.partition(":")
+            if token == progress_token and step in ("20", "50", "70", "90"):
+                set_progress(int(step))
         kernel = ctypes.windll.kernel32
         wait = kernel.WaitForSingleObject
         wait.argtypes = (wintypes.HANDLE, wintypes.DWORD)
         wait.restype = wintypes.DWORD
         code = wait(handle, 0)
         if code == 258:
-            wizard.after(250, poll, game)
+            wizard.after(250, poll, game, images)
             return
         exit_code = wintypes.DWORD(1)
         get_exit = kernel.GetExitCodeProcess
@@ -360,16 +444,20 @@ def setup_game(root):
         kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
         kernel.CloseHandle(handle)
         handle = None
-        install.state(["!disabled"])
+        progress_socket.close()
+        progress_socket = None
         if success and ready_game(game):
-            finish(game)
+            set_progress(100)
+            wizard.after(350, finish, game)
         else:
+            progress.pack_forget()
+            install.state(["!disabled"])
             status.set("설치를 완료하지 못했습니다. 게임을 종료하고 다시 시도하세요.")
 
     def begin():
-        nonlocal handle
+        nonlocal handle, progress_socket, progress_token, progress_value, progress_fish
         if not consent.get():
-            status.set("설치 내용을 확인하고 동의해 주세요.")
+            status.set("설치 안내를 읽고 확인란에 체크해 주세요.")
             return
         game = Path(path.get().strip()).resolve()
         if not all((game / name).is_file() for name in ("PCFish.exe", "GameAssembly.dll")):
@@ -379,13 +467,25 @@ def setup_game(root):
             finish(game)
             return
         try:
-            handle = elevated_install(game)
+            progress_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            progress_socket.bind(("127.0.0.1", 0))
+            progress_socket.setblocking(False)
+            progress_token = uuid4().hex
+            handle = elevated_install(game, (progress_socket.getsockname()[1], progress_token))
         except OSError as error:
+            if progress_socket is not None:
+                progress_socket.close()
+                progress_socket = None
             status.set(str(error))
             return
         install.state(["disabled"])
-        status.set("설치 완료를 기다리는 중…")
-        wizard.after(250, poll, game)
+        progress_value = 0
+        progress_fish = None
+        progress.pack(before=buttons, fill="x", pady=(0, 10))
+        set_progress(0)
+        images = Queue()
+        Thread(target=load_fish, args=(game, images), daemon=True).start()
+        wizard.after(250, poll, game, images)
 
     ttk.Button(buttons, text="취소", command=cancel).pack(side="left", padx=6)
     install = ttk.Button(buttons, text="설치 및 실행", command=begin)
@@ -405,6 +505,17 @@ class Controller:
         self.connected = False
         self.incompatible = False
         self.run_id = uuid4().hex
+        self.notification_settings_path = BRIDGE / "notification-settings.json"
+        self.notification_settings = DEFAULT_NOTIFICATION_SETTINGS.copy()
+        try:
+            saved = json.loads(self.notification_settings_path.read_text(encoding="utf-8"))
+            if isinstance(saved, dict):
+                self.notification_settings.update({
+                    key: saved[key] for key in self.notification_settings if isinstance(saved.get(key), bool)
+                })
+        except (OSError, ValueError):
+            pass
+        self.settings_window = None
         root.title(APP_NAME)
         icon = ASSETS / "pcfish.ico"
         if icon.is_file():
@@ -428,6 +539,7 @@ class Controller:
                    command=lambda: os.startfile("steam://rungameid/4842670")).pack(side="right", padx=16)
         self.update_button = ttk.Button(title_bar, text="업데이트 확인", command=self.check_update)
         self.update_button.pack(side="right")
+        ttk.Button(title_bar, text="설정", command=self.open_settings).pack(side="right", padx=(0, 8))
         self.game_path = tk.StringVar(value=str(game))
         tabs = ttk.Notebook(root)
         tabs.pack(fill="both", expand=True, padx=12, pady=12)
@@ -435,7 +547,16 @@ class Controller:
         tabs.add(panel, text="자동화")
         season = SeasonTab(tabs, self.game_path)
         tabs.add(season, text="시즌합성")
-        tabs.bind("<<NotebookTabChanged>>", lambda _: season.refresh())
+        self.catalog_tab = catalog = CatalogTab(tabs, self.game_path, BRIDGE / "favorites.json")
+        tabs.add(catalog, text="도감")
+
+        def refresh_tab(_event):
+            active = tabs.select()
+            for tab in (season, catalog):
+                if active == str(tab):
+                    tab.refresh()
+
+        tabs.bind("<<NotebookTabChanged>>", refresh_tab)
         self.status = tk.StringVar(value="게임 플러그인 연결 대기 중")
         tk.Label(panel, textvariable=self.status, bg=PANEL, fg=TEXT, anchor="w",
                  font=("Malgun Gothic", 11, "bold"), padx=12, pady=8,
@@ -539,9 +660,58 @@ class Controller:
         self.log_window = None
         self.last_log = ""
         self.last_history = ()
+        self.notifications_started = datetime.now().astimezone()
         self.catalog_path = None
         self.catalog = None
         self.tick()
+
+    def open_settings(self):
+        if self.settings_window is not None and self.settings_window.winfo_exists():
+            self.settings_window.lift()
+            return
+        window = self.settings_window = tk.Toplevel(self.root)
+        window.title(f"{APP_NAME} · 설정")
+        window.configure(bg=OCEAN)
+        window.transient(self.root)
+        window.resizable(False, False)
+        panel = ttk.Frame(window, padding=16)
+        panel.pack(fill="both", expand=True)
+        ttk.Label(panel, text="즐겨찾기 물고기 알림", font=("Malgun Gothic", 11, "bold")).pack(anchor="w")
+        draft = {}
+        for key, label in (("windows", "Windows 팝업 알림"), ("taskbar", "작업표시줄 아이콘 깜박임")):
+            draft[key] = tk.BooleanVar(window, value=self.notification_settings[key])
+            ttk.Checkbutton(panel, text=label, variable=draft[key], style="Ocean.TCheckbutton").pack(
+                anchor="w", pady=(8, 0))
+        buttons = ttk.Frame(panel)
+        buttons.pack(anchor="e", pady=(14, 0))
+
+        def save():
+            settings = {key: value.get() for key, value in draft.items()}
+            if self.save_notification_settings(settings, window):
+                window.destroy()
+
+        ttk.Button(buttons, text="취소", command=window.destroy).pack(side="left", padx=(0, 6))
+        ttk.Button(buttons, text="확인", command=save, style="Primary.TButton").pack(side="left")
+
+    def save_notification_settings(self, settings, parent):
+        path = self.notification_settings_path
+        temporary = path.with_name(f"notification-settings-{uuid4().hex}.tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(json.dumps(settings), encoding="utf-8")
+            temporary.replace(path)
+        except OSError as error:
+            messagebox.showerror("알림 설정 저장 실패", str(error), parent=parent)
+            return False
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if self.notification_settings["taskbar"] and not settings["taskbar"]:
+            flash_taskbar(self.root, enabled=False)
+        self.notification_settings = settings
+        return True
 
     def open_merge_options(self):
         if self.merge_options_window is not None and self.merge_options_window.winfo_exists():
@@ -763,9 +933,10 @@ class Controller:
                 stream.seek(max(0, event_path.stat().st_size - 96_000))
                 records = tuple(stream.read().decode("utf-8", errors="replace").splitlines()[-250:])
         except OSError:
-            records = ()
+            return
         if records == self.last_history and game == self.catalog_path:
             return
+        new_records = Counter(records) - Counter(self.last_history)
         self.last_history = records
         if game != self.catalog_path:
             self.catalog_path, self.catalog = game, None
@@ -775,11 +946,21 @@ class Controller:
             except (OSError, ValueError):
                 pass
         self.history.delete(*self.history.get_children())
+        notifications = []
         for line in reversed(records):
             try:
                 event = json.loads(line)
-                stamp = datetime.fromisoformat(event["Time"]).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+                occurred = datetime.fromisoformat(event["Time"]).astimezone()
+                stamp = occurred.strftime("%Y-%m-%d %H:%M:%S")
                 kind, detail = event["Kind"], event["Message"]
+                child = event.get("Child")
+                if (new_records[line] and occurred >= self.notifications_started
+                        and kind in ("교배 완료", "합성 완료") and isinstance(child, str)
+                        and child in self.catalog_tab.favorites and self.catalog
+                        and child in self.catalog.variants):
+                    species, _, _ = self.catalog.variants[child]
+                    notifications.append((child, self.catalog.names.get(species, species)))
+                    new_records[line] -= 1
                 if kind == "교배 요청":
                     continue
                 if kind == "교배 완료":
@@ -790,6 +971,16 @@ class Controller:
             except (KeyError, TypeError, ValueError):
                 continue
             self.history.insert("", "end", values=(stamp, kind, detail))
+        if notifications:
+            self.send_favorite_notifications(game, list(reversed(notifications)))
+
+    def send_favorite_notifications(self, game, notifications):
+        if self.notification_settings["taskbar"]:
+            flash_taskbar(self.root)
+        if self.notification_settings["windows"]:
+            Thread(target=notify_favorites, args=(game, BRIDGE / "notification-art",
+                                                  notifications, lambda: self.notification_settings["windows"]),
+                   daemon=True).start()
 
     def write(self, command):
         BRIDGE.mkdir(parents=True, exist_ok=True)
@@ -976,12 +1167,23 @@ if __name__ == "__main__":
             raise SystemExit(1)
         report.write_text(json.dumps(result), encoding="utf-8")
         raise SystemExit(0)
-    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("PCFish.Automation.Pink")
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
     root = tk.Tk()
     root.withdraw()
-    if len(sys.argv) == 3 and sys.argv[1] == "--install-module":
+    if len(sys.argv) in (3, 5) and sys.argv[1] == "--install-module":
         try:
-            install_module(Path(sys.argv[2]))
+            if len(sys.argv) == 5:
+                port, token = int(sys.argv[3]), sys.argv[4]
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as reporter:
+                    def report(step):
+                        try:
+                            reporter.sendto(f"{token}:{step}".encode("ascii"), ("127.0.0.1", port))
+                        except OSError:
+                            pass
+
+                    install_module(Path(sys.argv[2]), report)
+            else:
+                install_module(Path(sys.argv[2]))
         except (OSError, ValueError, zipfile.BadZipFile, subprocess.SubprocessError) as error:
             messagebox.showerror("모듈 설치 실패", str(error), parent=root)
             raise SystemExit(1)

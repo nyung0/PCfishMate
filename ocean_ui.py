@@ -102,9 +102,12 @@ def ocean_style(root):
 
 
 class CardGrid(ttk.Frame):
-    def __init__(self, parent, select_card=None):
+    def __init__(self, parent, select_card=None, card_width=156, toggle_favorite=None):
         super().__init__(parent)
         self.cards = []
+        self.card_width = card_width
+        self.toggle_favorite = toggle_favorite
+        self.favorites = ()
         self.canvas = tk.Canvas(self, background=OCEAN, highlightthickness=0)
         scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=scrollbar.set)
@@ -114,10 +117,20 @@ class CardGrid(ttk.Frame):
         self.canvas.bind("<MouseWheel>", self.wheel)
         if select_card:
             self.canvas.bind("<Button-1>", lambda event: self.select(event, select_card))
+        if toggle_favorite:
+            self.canvas.bind("<Button-1>", self.click_favorite, add="+")
+
+    def click_favorite(self, event):
+        x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
+        for item in self.canvas.find_overlapping(x, y, x, y):
+            for tag in self.canvas.gettags(item):
+                if tag.startswith("favorite-"):
+                    self.toggle_favorite(int(tag.removeprefix("favorite-")))
+                    return
 
     def select(self, event, callback):
-        width = max(156, self.canvas.winfo_width())
-        columns = max(1, width // 156)
+        width = max(self.card_width, self.canvas.winfo_width())
+        columns = max(1, width // self.card_width)
         x, y = event.x, self.canvas.canvasy(event.y)
         step = width / columns
         column, row = int(x // step), int(y // 122)
@@ -129,8 +142,9 @@ class CardGrid(ttk.Frame):
     def wheel(self, event):
         self.canvas.yview_scroll(-int(event.delta / 120), "units")
 
-    def set_cards(self, cards, reset=True):
+    def set_cards(self, cards, reset=True, favorites=()):
         self.cards = cards
+        self.favorites = favorites
         self.draw()
         if reset:
             self.canvas.yview_moveto(0)
@@ -138,8 +152,8 @@ class CardGrid(ttk.Frame):
     def draw(self):
         canvas = self.canvas
         canvas.delete("all")
-        width = max(156, canvas.winfo_width())
-        columns = max(1, width // 156)
+        width = max(self.card_width, canvas.winfo_width())
+        columns = max(1, width // self.card_width)
         step = width / columns
         for i, (name, rarity, stars, detail, picture, owned) in enumerate(self.cards):
             row, column = divmod(i, columns)
@@ -149,6 +163,15 @@ class CardGrid(ttk.Frame):
                          fill=PANEL if owned else "#172F50", outline=EDGE if owned else "#507193")
             if picture:
                 canvas.create_image(center, y + 26, image=picture)
+            if self.toggle_favorite is not None:
+                favorite = self.favorites[i]
+                right = x + step - 8
+                tag = f"favorite-{i}"
+                canvas.create_rectangle(right - 30, y + 4, right - 4, y + 30,
+                                        fill=WATER if favorite else OCEAN, width=0, tags=tag)
+                canvas.create_text(right - 17, y + 17, text="★" if favorite else "☆",
+                                   fill=ACCENT if favorite else MUTED,
+                                   font=("Segoe UI Symbol", 12), tags=tag)
             canvas.create_text(center, y + 60, text=name, width=int(step - 18),
                                fill=TEXT if owned else MUTED, font=("Malgun Gothic", 9, "bold"))
             grade = "★" * stars if stars else "—"

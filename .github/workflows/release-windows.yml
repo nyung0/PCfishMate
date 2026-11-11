@@ -37,7 +37,17 @@ jobs:
         run: |
           $tag = (Get-Content internal/release-version.txt -Raw).Trim()
           $notes = @'
-          업데이트 확인에서 최신 버전일 때 현재 버전 번호도 함께 표시합니다.
+          ### 🐠 도감과 즐겨찾기
+
+          - 변종별 도감, 희귀도 필터, 정렬, 즐겨찾기를 추가했어요.
+          - 즐겨찾기한 물고기가 자동 교배나 합성으로 나오면 Windows 팝업과 작업표시줄 알림을 각각 켤 수 있어요.
+          - 즐겨찾기 파일이 손상되면 백업을 불러와요.
+
+          ### 설치
+
+          게임을 종료하고 `PCfishMate.exe`를 실행해요. 설치 안내를 확인하면 산호 흰동가리와 함께 설치 진행률을 볼 수 있어요.
+
+          [Steam 이용약관 제4조](https://store.steampowered.com/subscriber_agreement/#4)에서 자동화 관련 제한을 확인할 수 있어요.
           '@
           gh release create $tag dist/PCfishMate.exe dist/SHA256SUMS.txt --target $env:GITHUB_SHA --title "PCfishMate $tag" --notes "$notes"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
