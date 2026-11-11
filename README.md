@@ -4,7 +4,7 @@
 
 PC FISH의 교배, 합성, 수조 관리를 도와주는 Windows 앱이에요.
 
-**[🐟 최신 버전 다운로드](https://github.com/nyung0/PCfishMate/releases/latest/download/PCfishMate.exe)** · [릴리스 목록](https://github.com/nyung0/PCfishMate/releases)
+**[🐟 최신 릴리스](https://github.com/nyung0/PCfishMate/releases/latest)**
 
 ## 할 수 있어요
 
