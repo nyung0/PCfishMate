@@ -37,9 +37,7 @@ jobs:
         run: |
           $tag = (Get-Content internal/release-version.txt -Raw).Trim()
           $notes = @'
-          README와 소스 실행 경로를 현재 PCfishMate에 맞췄습니다.
-          클론한 소스와 GitHub Actions에서 같은 Windows 빌드 스크립트를 사용합니다.
-          설치 방법은 README를 참고하세요.
+          업데이트 확인에서 최신 버전일 때 현재 버전 번호도 함께 표시합니다.
           '@
           gh release create $tag dist/PCfishMate.exe dist/SHA256SUMS.txt --target $env:GITHUB_SHA --title "PCfishMate $tag" --notes "$notes"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }

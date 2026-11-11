@@ -634,7 +634,7 @@ class Controller:
                 else:
                     webbrowser.open(RELEASE_PAGE)
         else:
-            messagebox.showinfo("업데이트 확인", "최신 버전입니다", parent=self.root)
+            messagebox.showinfo("업데이트 확인", f"최신 버전입니다.\n\n현재 버전 {current}", parent=self.root)
 
     def download_update(self, tag, asset):
         self.update_button.state(["disabled"])
