@@ -22,6 +22,9 @@ from datetime import datetime
 from hashlib import file_digest
 from ctypes import wintypes
 from urllib.request import urlopen
+if not getattr(sys, "frozen", False):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from ocean_ui import PANEL, RARITIES, RARITY_COLORS, TEXT, WATER, ocean_style
 from season_tab import GameData, SeasonTab, load_grade_icon, load_season_art
 
@@ -151,7 +154,7 @@ def repair_unity_cache(game):
         return
     archive.parent.mkdir(exist_ok=True)
     staged = archive.with_name(f"{archive.name}.{uuid4().hex}.tmp")
-    bundled = ASSETS / archive.name
+    bundled = installer_asset(archive.name)
     try:
         if bundled.is_file():
             shutil.copyfile(bundled, staged)
@@ -167,6 +170,15 @@ def repair_unity_cache(game):
         staged.unlink(missing_ok=True)
 
 
+def installer_asset(name):
+    if not getattr(sys, "frozen", False):
+        build = ASSETS.parent / "build"
+        local = build / "plugin" / name if name == "PCFishInternal.dll" else build / name
+        if local.is_file():
+            return local
+    return ASSETS / name
+
+
 def install_module(game):
     if not (game / "PCFish.exe").is_file() or not (game / "GameAssembly.dll").is_file():
         raise ValueError("PCFish.exe가 있는 게임 폴더를 선택하세요.")
@@ -179,7 +191,7 @@ def install_module(game):
         raise ValueError("기존 로더 파일 일부가 남아 있어 설치를 중지했습니다.")
     if not present:
         with tempfile.TemporaryDirectory() as folder:
-            with zipfile.ZipFile(ASSETS / "loader.zip") as archive:
+            with zipfile.ZipFile(installer_asset("loader.zip")) as archive:
                 archive.extractall(folder)
             for name in LOADER_FILES:
                 source = Path(folder) / name
@@ -196,7 +208,7 @@ def install_module(game):
     target = plugins / "PCFishInternal.dll"
     staged = plugins / f"PCFishInternal-{uuid4().hex}.tmp"
     try:
-        shutil.copy2(ASSETS / target.name, staged)
+        shutil.copy2(installer_asset(target.name), staged)
         staged.replace(target)
     finally:
         staged.unlink(missing_ok=True)
@@ -218,7 +230,7 @@ def ready_game(game):
     try:
         if not all((game / name).exists() for name in (*LOADER_FILES, "PCFish.exe", "GameAssembly.dll")):
             return False
-        with (ASSETS / "PCFishInternal.dll").open("rb") as source, (
+        with installer_asset("PCFishInternal.dll").open("rb") as source, (
                 game / "BepInEx/plugins/PCFishInternal.dll").open("rb") as installed:
             if file_digest(source, "sha256").digest() != file_digest(installed, "sha256").digest():
                 return False
