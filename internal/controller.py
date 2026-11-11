@@ -857,6 +857,8 @@ class Controller:
                 status = ("실행 중 · " if state["Running"] else "") + state["Message"]
                 if state.get("MergeMessage"):
                     status += "\n합성 · " + state["MergeMessage"]
+                for error in state.get("FeatureErrors", []):
+                    status += "\n" + error
                 self.status.set(status)
                 connected = state.get("Version") == 3
                 if not connected:

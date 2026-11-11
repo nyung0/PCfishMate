@@ -13,7 +13,7 @@ public sealed class Plugin : BasePlugin
 {
     private const BindingFlags Members = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
     private static Plugin instance = null!;
-    private static object? data, ui, breed, home, merge;
+    private static object? data, ui, breed, home, merge, mergePicker;
     private readonly Stopwatch clock = Stopwatch.StartNew();
     private ConfigEntry<bool> enabled = null!;
     private ConfigEntry<int> interval = null!;
@@ -31,16 +31,22 @@ public sealed class Plugin : BasePlugin
     private HashSet<string>? mergeFishBefore;
     private double mergeDeadline, nextMerge;
     private double mergeSetupUntil;
+    private double mergeSetupDeadline;
     private string mergeSummary = "";
     private string mergeMessage = "";
     private static readonly string[] RarityNames = { "기본", "일반", "고급", "희귀", "전설", "신화" };
     private readonly HashSet<string> fishIdsBefore = new();
     private string?[] parentVariants = Array.Empty<string?>();
     private string message = "게임 연결됨 · 대기 중";
-    private string? bridgeRun, blockedRun;
+    private string? bridgeRun, blockedRun, lastStartedRun;
     private readonly string bridge = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PCFishHelper", "internal");
     private bool bridgeEnabled;
+    private bool mergeHooksReady, upgradeHookReady;
+    private bool mergeFailed, breedFailed, upgradeFailed;
+    private string mergeFailure = "", breedFailure = "", upgradeFailure = "";
+    private bool bridgeReadFailed;
+    private bool mergeSlotsOwned, breedSlotsOwned;
 
     [DllImport("user32.dll")]
     private static extern short GetAsyncKeyState(int key);
@@ -59,13 +65,29 @@ public sealed class Plugin : BasePlugin
         {
             Hook("NN.PF.Core.Managers.GameDataManager", "Start", nameof(CaptureData)),
             Hook("NN.PF.Core.Managers.UIManager", "Start", nameof(CaptureUi)),
-            Hook("NN.PF.UI.Home.UIHome", "OnEnable", nameof(CaptureHome)),
-            Hook("NN.PF.UI.Merge.UIMerge", "OnEnable", nameof(CaptureMerge)),
             Hook("NN.PF.Core.Managers.GameManager", "Update", nameof(Tick)),
         };
         foreach (var (target, postfix) in hooks)
             harmony.Patch(target, postfix: new HarmonyMethod(postfix));
+        upgradeHookReady = TryHook(harmony, "수조 레벨업", "NN.PF.UI.Home.UIHome", nameof(CaptureHome));
+        mergeHooksReady = TryHook(harmony, "합성", "NN.PF.UI.Merge.UIMerge", nameof(CaptureMerge))
+            && TryHook(harmony, "합성", "NN.PF.UI.Merge.UIMergeType", nameof(CaptureMergePicker));
         Log.LogInfo("Internal breeding hooks loaded. F7 starts or stops; F8 stops.");
+    }
+
+    private bool TryHook(Harmony harmony, string feature, string type, string postfix)
+    {
+        try
+        {
+            var (target, handler) = Hook(type, "OnEnable", postfix);
+            harmony.Patch(target, postfix: new HarmonyMethod(handler));
+            return true;
+        }
+        catch (Exception error)
+        {
+            Log.LogWarning($"{feature} 호환성 오류 · {type}.OnEnable · {error.GetBaseException().Message}");
+            return false;
+        }
     }
 
     private static (MethodInfo, MethodInfo) Hook(string type, string method, string postfix)
@@ -79,6 +101,7 @@ public sealed class Plugin : BasePlugin
     private static void CaptureUi(object __instance) => ui = __instance;
     private static void CaptureHome(object __instance) => home = __instance;
     private static void CaptureMerge(object __instance) => merge = __instance;
+    private static void CaptureMergePicker(object __instance) => mergePicker = __instance;
 
     private bool previousF7;
     private bool previousF8;
@@ -96,12 +119,19 @@ public sealed class Plugin : BasePlugin
         if (plugin.clock.Elapsed.TotalSeconds >= plugin.nextConfig)
         {
             plugin.nextConfig = plugin.clock.Elapsed.TotalSeconds + 1;
-            var stamp = File.GetLastWriteTimeUtc(plugin.Config.ConfigFilePath);
-            if (stamp != plugin.configStamp)
+            try
             {
-                plugin.configStamp = stamp;
-                plugin.Config.Reload();
-                plugin.Log.LogInfo($"Config reloaded; breeding enabled: {plugin.enabled.Value}.");
+                var stamp = File.GetLastWriteTimeUtc(plugin.Config.ConfigFilePath);
+                if (stamp != plugin.configStamp)
+                {
+                    plugin.configStamp = stamp;
+                    plugin.Config.Reload();
+                    plugin.Log.LogInfo($"Config reloaded; breeding enabled: {plugin.enabled.Value}.");
+                }
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                plugin.Log.LogWarning($"게임 모듈 설정 읽기 실패 · {error.Message}");
             }
         }
         if (plugin.clock.Elapsed.TotalSeconds >= plugin.nextBridge)
@@ -113,6 +143,8 @@ public sealed class Plugin : BasePlugin
         if (f7 && !plugin.previousF7 && plugin.command is null)
         {
             plugin.enabled.Value = !plugin.enabled.Value;
+            if (plugin.enabled.Value)
+                plugin.breedFailed = false;
             plugin.Record(plugin.enabled.Value ? "자동화 시작" : "자동화 중지", "F7 · 교배");
         }
         plugin.previousF7 = f7;
@@ -187,6 +219,13 @@ public sealed class Plugin : BasePlugin
         {
             Directory.CreateDirectory(bridge);
             command = ReadCommand();
+            if (command is { Enabled: true } && command.RunId != lastStartedRun && command.RunId != blockedRun)
+            {
+                lastStartedRun = command.RunId;
+                breedFailed = mergeFailed = upgradeFailed = false;
+                breedFailure = mergeFailure = upgradeFailure = "";
+                mergeSetupDeadline = 0;
+            }
             if (command is not null && enabled.Value)
                 enabled.Value = false;
             bridgeRun = command?.RunId;
@@ -197,14 +236,29 @@ public sealed class Plugin : BasePlugin
             var status = Path.Combine(bridge, "status.json");
             var temporary = status + ".tmp";
             File.WriteAllText(temporary, JsonSerializer.Serialize(new {
-                Version = 3, Running = enabled.Value || bridgeEnabled, Message = message,
+                Version = 3,
+                Running = bridgeEnabled
+                    ? (command?.Breed != false && !breedFailed)
+                      || (command?.AutoMerge == true && mergeHooksReady && !mergeFailed)
+                      || (command?.TankUpgrade == true && upgradeHookReady && !upgradeFailed)
+                    : enabled.Value && !breedFailed,
+                Message = message,
                 MergeMessage = bridgeEnabled && command?.AutoMerge == true ? mergeMessage : "",
+                FeatureErrors = new[] {
+                    command?.Breed != false ? breedFailure : "",
+                    command?.AutoMerge == true ? mergeHooksReady ? mergeFailure : "합성 · 이 게임 버전과 호환되지 않습니다" : "",
+                    command?.TankUpgrade == true ? upgradeHookReady ? upgradeFailure : "수조 레벨업 · 이 게임 버전과 호환되지 않습니다" : "",
+                }.Where(error => error.Length > 0),
             }));
             File.Move(temporary, status, overwrite: true);
+            bridgeReadFailed = false;
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
         {
             bridgeEnabled = false;
+            if (!bridgeReadFailed)
+                Log.LogWarning($"컨트롤러 연결 오류 · {error.GetBaseException().Message}");
+            bridgeReadFailed = true;
         }
     }
 
@@ -217,19 +271,114 @@ public sealed class Plugin : BasePlugin
             return;
         nextPoll = now + 0.25;
         if (data is null)
-            throw new InvalidOperationException("The game data manager did not initialize.");
+        {
+            message = "게임 데이터 초기화 대기 중";
+            return;
+        }
+
+        if (mergePending is not null && RunMerge(now))
+            return;
+        if (waiting)
+        {
+            RunBreed(gameManager, now);
+            return;
+        }
+        if (upgradeHookReady && !upgradeFailed)
+        {
+            try
+            {
+                if (TryUpgrade(now))
+                    return;
+            }
+            catch (Exception error)
+            {
+                upgradeFailed = true;
+                upgradeFrom = null;
+                upgradePopup = false;
+                upgradeFailure = ReportFailure("수조 레벨업", error);
+            }
+        }
+        if (!enabled.Value && !bridgeEnabled)
+            return;
+        if (mergeHooksReady && !mergeFailed && bridgeEnabled && command?.AutoMerge == true && RunMerge(now))
+            return;
+        if (!breedFailed && (bridgeEnabled ? command?.Breed != false : enabled.Value))
+            RunBreed(gameManager, now);
+    }
+
+    private string ReportFailure(string feature, Exception error)
+    {
+        var cause = error.GetBaseException();
+        string detail = $"{feature} 자동화 중지 · {cause.GetType().Name}: {cause.Message}";
+        Record("오류", detail);
+        return detail;
+    }
+
+    private void ClearOwnedSlots(object? screen, string method, string feature)
+    {
+        try
+        {
+            if (screen is not null && Active(screen))
+                Call(screen, method);
+        }
+        catch (Exception error)
+        {
+            Log.LogWarning($"{feature} 슬롯 정리 실패 · {error.GetBaseException().Message}");
+        }
+    }
+
+    private bool RunMerge(double now)
+    {
+        try
+        {
+            var fish = Read(data!, "fishList");
+            if (fish is null)
+                return false;
+            int count = (int)Read(fish, "Count")!;
+            if (mergePending is null)
+                return TryMerge(fish, count, now);
+            FinishMerge(fish, count, now);
+            return true;
+        }
+        catch (Exception error)
+        {
+            if (mergeSlotsOwned)
+                ClearOwnedSlots(merge, "ResetParent", "합성");
+            mergeSlotsOwned = false;
+            mergeFailed = true;
+            mergePending = null;
+            mergeFishBefore = null;
+            mergeFailure = ReportFailure("합성", error);
+            mergeMessage = "";
+            return false;
+        }
+    }
+
+    private void RunBreed(object gameManager, double now)
+    {
+        try
+        {
+            BreedStep(gameManager, now);
+        }
+        catch (Exception error)
+        {
+            if (breedSlotsOwned)
+                ClearOwnedSlots(breed, "ResetParentFishList", "교배");
+            breedSlotsOwned = false;
+            breedFailed = true;
+            waiting = false;
+            breedFailure = ReportFailure("교배", error);
+        }
+    }
+
+    private void BreedStep(object gameManager, double now)
+    {
         breed = Read(gameManager, "uiBreed");
-        int hearts = (int)Read(data, "breedCount")!;
-        var fish = Read(data, "fishList");
+        int hearts = (int)Read(data!, "breedCount")!;
+        var fish = Read(data!, "fishList");
         if (fish is null)
             return;
         int count = (int)Read(fish, "Count")!;
-
-        if (mergePending is not null)
-        {
-            FinishMerge(fish, count, now);
-            return;
-        }
         if (waiting)
         {
             var added = Enumerable.Range(0, count).Select(i => Item(fish, i))
@@ -265,15 +414,8 @@ public sealed class Plugin : BasePlugin
             waiting = false;
             message = "게임에서 교배 완료 확인";
             Record("교배 완료", message, parentVariants, child);
+            return;
         }
-        if (TryUpgrade(now))
-            return;
-        if (!enabled.Value && !bridgeEnabled)
-            return;
-        if (TryMerge(fish, count, now))
-            return;
-        if (bridgeEnabled && command?.Breed == false)
-            return;
         if (hearts <= 0)
         {
             message = "하트 회복 대기 중";
@@ -316,11 +458,13 @@ public sealed class Plugin : BasePlugin
             message = "부모 슬롯이 비기를 기다리는 중";
             return;
         }
+        breedSlotsOwned = true;
         foreach (var parent in parents)
         {
             if (Call(breed, "SetParent", parent.Id) is not true)
             {
                 Call(breed, "ResetParentFishList");
+                breedSlotsOwned = false;
                 message = "게임이 부모 지정을 거절했습니다";
                 Record("교배 건너뜀", message);
                 nextBreed = now + Interval;
@@ -343,6 +487,7 @@ public sealed class Plugin : BasePlugin
                 || (latest.SameBreedStars && parents[0].Stars != parents[1].Stars))
             {
                 Call(breed, "ResetParentFishList");
+                breedSlotsOwned = false;
                 message = "교배 설정이 변경되어 다시 확인 중";
                 return;
             }
@@ -365,6 +510,7 @@ public sealed class Plugin : BasePlugin
         waitUntil = now + 20;
         nextBreed = now + Interval;
         message = "교배 결과 확인 중";
+        breedSlotsOwned = false;
         Call(breed, "Breed");
     }
 
@@ -417,6 +563,7 @@ public sealed class Plugin : BasePlugin
         var batch = groups.FirstOrDefault(group => group.Count() >= 10)?.Take(10).ToArray();
         if (batch?.Length != 10)
         {
+            mergeSetupDeadline = 0;
             int available = groups.Select(group => group.Count()).DefaultIfEmpty().Max();
             string grades = options.SameStars != false ? "같은 별 등급" : "별 등급 혼합";
             mergeMessage = $"{grades} 재료 {available}/10 · " +
@@ -425,6 +572,7 @@ public sealed class Plugin : BasePlugin
         }
         if (merge is null || !Active(merge))
         {
+            CheckMergeSetupDeadline(now);
             mergeMessage = "재료 10/10 · 합성 탭 여는 중";
             mergeSetupUntil = now + 1;
             if (Read(ui, "viewWindow") is object window && Read(window, "activeInHierarchy") is false)
@@ -434,6 +582,7 @@ public sealed class Plugin : BasePlugin
         }
         if (MergeSlots(merge).Length != 0)
         {
+            mergeSetupDeadline = 0;
             mergeMessage = "기존 합성 슬롯이 비기를 기다리는 중";
             return true;
         }
@@ -443,9 +592,10 @@ public sealed class Plugin : BasePlugin
         if (pickerOpen || Read(merge, "mergeType")?.ToString() != "Standard" ||
             Read(merge, "grade") is not int currentGrade || currentGrade != grade)
         {
+            CheckMergeSetupDeadline(now);
             if (!pickerOpen)
                 Call(merge, "OpenMergeType");
-            var selection = Read(merge, "uiMergeType");
+            var selection = mergePicker;
             if (selection is null || !Active(selection))
             {
                 mergeMessage = "일반 합성 설정 창을 여는 중";
@@ -461,12 +611,15 @@ public sealed class Plugin : BasePlugin
             mergeSetupUntil = now + 1;
             return true;
         }
+        mergeSetupDeadline = 0;
         var ids = batch.Select(item => (string)Read(item, "Id")!).ToHashSet();
+        mergeSlotsOwned = true;
         foreach (var id in ids)
         {
             if (Call(merge, "SetParent", id) is true)
                 continue;
             Call(merge, "ResetParent");
+            mergeSlotsOwned = false;
             nextMerge = now + Interval;
             mergeMessage = options.SameStars == false
                 ? "게임이 혼합 재료 등록을 거절했습니다"
@@ -481,6 +634,7 @@ public sealed class Plugin : BasePlugin
             !ids.SetEquals(MergeSlots(merge)))
         {
             Call(merge, "ResetParent");
+            mergeSlotsOwned = false;
             return true;
         }
         mergeSummary = string.Join(" / ", batch.GroupBy(item =>
@@ -494,8 +648,17 @@ public sealed class Plugin : BasePlugin
         nextMerge = now + Interval;
         message = "합성 결과 확인 중";
         mergeMessage = message;
+        mergeSlotsOwned = false;
         Call(merge, "Merge");
         return true;
+    }
+
+    private void CheckMergeSetupDeadline(double now)
+    {
+        if (mergeSetupDeadline == 0)
+            mergeSetupDeadline = now + 10;
+        else if (now >= mergeSetupDeadline)
+            throw new InvalidOperationException("일반 합성 화면 또는 별 등급 전환을 확인하지 못했습니다.");
     }
 
     private void FinishMerge(object fish, int count, double now)
@@ -550,11 +713,7 @@ public sealed class Plugin : BasePlugin
             }
             else if (now >= upgradeDeadline)
             {
-                upgradeFrom = null;
-                blockedRun = bridgeRun;
-                bridgeEnabled = false;
-                message = "게임에서 수조 레벨업을 확인하지 못했습니다";
-                Record("오류", message);
+                throw new InvalidOperationException("게임에서 수조 레벨업을 확인하지 못했습니다.");
             }
             return true;
         }
