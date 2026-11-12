@@ -31,7 +31,7 @@ if not getattr(sys, "frozen", False):
 from catalog_tab import CatalogTab, catalog_art
 from favorite_notifications import APP_ID, DEFAULT_NOTIFICATION_SETTINGS, flash_taskbar, notify_favorites
 from ocean_ui import OCEAN, PANEL, RARITIES, RARITY_COLORS, TEXT, WATER, ocean_style
-from season_tab import GameData, SeasonTab, load_grade_icon, load_install_fish, load_season_art
+from season_tab import GameData, SeasonTab, load_automation_icons, load_grade_icon, load_install_fish, load_season_art
 
 
 BRIDGE = Path(os.environ["LOCALAPPDATA"]) / "PCFishHelper" / "internal"
@@ -539,7 +539,7 @@ class Controller:
                    command=lambda: os.startfile("steam://rungameid/4842670")).pack(side="right", padx=16)
         self.update_button = ttk.Button(title_bar, text="업데이트 확인", command=self.check_update)
         self.update_button.pack(side="right")
-        ttk.Button(title_bar, text="설정", command=self.open_settings).pack(side="right", padx=(0, 8))
+        ttk.Button(title_bar, text="알림 설정", command=self.open_settings).pack(side="right", padx=(0, 8))
         self.game_path = tk.StringVar(value=str(game))
         tabs = ttk.Notebook(root)
         tabs.pack(fill="both", expand=True, padx=12, pady=12)
@@ -558,15 +558,34 @@ class Controller:
 
         tabs.bind("<<NotebookTabChanged>>", refresh_tab)
         self.status = tk.StringVar(value="게임 플러그인 연결 대기 중")
-        tk.Label(panel, textvariable=self.status, bg=PANEL, fg=TEXT, anchor="w",
+        status_panel = tk.Frame(panel, bg=PANEL)
+        status_panel.pack(fill="x", pady=(0, 10))
+        tk.Label(status_panel, textvariable=self.status, bg=PANEL, fg=TEXT, anchor="w",
                  font=("Malgun Gothic", 11, "bold"), padx=12, pady=8,
-                 wraplength=560).pack(fill="x", pady=(0, 10))
+                 wraplength=560).pack(fill="x")
+        self.heart_row = tk.Frame(status_panel, bg=PANEL)
+        self.heart_icons = tk.Frame(self.heart_row, bg=PANEL)
+        self.heart_icons.pack(side="left", padx=(0, 8))
+        self.heart_text = tk.StringVar()
+        tk.Label(self.heart_row, textvariable=self.heart_text, bg=PANEL, fg=TEXT,
+                 font=("Malgun Gothic", 9)).pack(side="left")
+        self.automation_images = {}
+        self.heart_display = None
+        try:
+            self.automation_images = {name: tk.PhotoImage(master=root, data=png)
+                                      for name, png in load_automation_icons(game).items()}
+        except Exception:
+            pass  # Use text when the installed game does not expose these sprites.
+        self.heart_images = {
+            filled: self.automation_images.get(name)
+            for filled, name in ((True, "Icon_BreedCountOn"), (False, "Icon_BreedCountOff"))
+        }
         modes = ttk.Frame(panel)
         modes.pack(anchor="w", pady=(0, 6))
 
-        def divider(major=False):
-            line = tk.Frame(panel, bg=WATER if major else PANEL,
-                            height=2 if major else 1, width=1 if major else 365)
+        def divider(major=False, parent=panel):
+            line = tk.Frame(parent, bg=WATER if major else PANEL,
+                            height=2 if major else 1, width=1 if major else 265)
             line.pack(anchor="w", fill="x" if major else "none", pady=(2, 4))
         self.breed_enabled = tk.BooleanVar(value=True)
         self.upgrade_enabled = tk.BooleanVar(value=True)
@@ -578,16 +597,42 @@ class Controller:
         self.same_merge_stars = tk.BooleanVar(value=True)
         self.merge_filters = [tk.BooleanVar(value=True) for _ in range(4)]
         self.merge_rarities = [tk.BooleanVar(value=True) for _ in range(5)]
-        self.merge_options_window = None
         self.merge_exclusions = None
-        for label, flag in (("교배 자동화", self.breed_enabled), ("수조 레벨업 자동화", self.upgrade_enabled),
-                            ("합성 자동화", self.merge_enabled)):
+        for label, flag, sprite in (("교배 자동화", self.breed_enabled, "Icon_BreedHeart"),
+                                    ("수조 레벨업 자동화", self.upgrade_enabled, "Icon_LvUp"),
+                                    ("합성 자동화", self.merge_enabled, "Icon_Merge")):
             ttk.Checkbutton(modes, text=label, variable=flag,
+                            image=self.automation_images.get(sprite) or "", compound="left",
                             style="Ocean.TCheckbutton", command=self.update_modes).pack(side="left", padx=(0, 14))
-        ttk.Button(modes, text="합성 옵션", command=self.open_merge_options).pack(side="left")
         divider(major=True)
-        ttk.Label(panel, text="교배 허용 희귀도 · 두 부모 모두 적용").pack(anchor="w", pady=(2, 4))
-        grades = ttk.Frame(panel)
+        options_row = ttk.Frame(panel)
+        options_row.pack(fill="x")
+        for column in range(2):
+            options_row.columnconfigure(column, weight=1, uniform="options")
+
+        breed_options = ttk.Frame(options_row)
+        merge_options = ttk.Frame(options_row)
+        sections = (("교배 옵션", breed_options), ("합성 옵션", merge_options))
+        option_buttons = []
+
+        def show_options(selected):
+            opened = selected is not None and not selected.winfo_manager()
+            for (title, body), button in zip(sections, option_buttons):
+                active = opened and body is selected
+                if active:
+                    body.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+                else:
+                    body.grid_remove()
+                button.configure(text=f"{title}  {'▾' if active else '▸'}")
+
+        for column, (title, body) in enumerate(sections):
+            button = ttk.Button(options_row, text=title, command=lambda section=body: show_options(section))
+            button.grid(row=0, column=column, sticky="ew", padx=(0, 6) if column == 0 else (6, 0))
+            option_buttons.append(button)
+        show_options(breed_options)
+        self.build_merge_options(merge_options, divider)
+        ttk.Label(breed_options, text="교배 허용 희귀도 · 두 부모 모두 적용").pack(anchor="w", pady=(2, 4))
+        grades = ttk.Frame(breed_options)
         grades.pack(anchor="w")
         self.flags = [tk.BooleanVar(value=True) for _ in RARITIES]
         style = ttk.Style(root)
@@ -597,9 +642,9 @@ class Controller:
             style.map(rarity_style, foreground=[("active", RARITY_COLORS[index])])
             ttk.Checkbutton(grades, text=grade, variable=flag,
                             style=rarity_style, command=self.update_modes).pack(side="left", padx=(0, 8))
-        divider()
-        ttk.Label(panel, text="교배 허용 별 등급 · 두 부모 모두 적용").pack(anchor="w", pady=(5, 2))
-        stars = ttk.Frame(panel)
+        divider(parent=breed_options)
+        ttk.Label(breed_options, text="교배 허용 별 등급 · 두 부모 모두 적용").pack(anchor="w", pady=(5, 2))
+        stars = ttk.Frame(breed_options)
         stars.pack(anchor="w")
         try:
             icon = load_grade_icon(game)
@@ -619,26 +664,27 @@ class Controller:
             appearance = {"image": self.star_images[count - 1]} if count and self.star_images else {}
             ttk.Checkbutton(stars, text=label, variable=flag, style="Ocean.TCheckbutton", **appearance,
                             command=self.update_modes).pack(side="left", padx=(0, 8))
-        divider()
-        matching = ttk.Frame(panel)
+        divider(parent=breed_options)
+        matching = ttk.Frame(breed_options)
         matching.pack(anchor="w", pady=(5, 0))
         for label, flag in (("같은 희귀도끼리만 교배", self.same_breed),
                             ("같은 별 등급끼리만 교배", self.same_breed_stars)):
             ttk.Checkbutton(matching, text=label, variable=flag, style="Ocean.TCheckbutton",
                             command=self.update_modes).pack(side="left", padx=(0, 12))
-        divider(major=True)
-        priority = ttk.Frame(panel)
-        priority.pack(anchor="w", pady=(8, 0))
+        divider(parent=breed_options)
+        priority = ttk.Frame(breed_options)
+        priority.pack(anchor="w", pady=(2, 0))
         ttk.Label(priority, text="교배 우선순위").pack(side="left", padx=(0, 8))
         self.priority = ttk.Combobox(priority, state="readonly", width=34,
                                     values=("희귀도 높은 순 → 별 등급 높은 순", "별 등급 높은 순 → 희귀도 높은 순"))
         self.priority.current(0)
         self.priority.bind("<<ComboboxSelected>>", lambda _: self.update_modes())
         self.priority.pack(side="left")
+        divider(major=True)
         controls = ttk.Frame(panel)
         controls.pack(anchor="w", pady=10)
         self.interval = tk.StringVar(value="10")
-        ttk.Label(controls, text="교배 간격 (초)").pack(side="left")
+        ttk.Label(controls, text="교배·합성 간격 (초)").pack(side="left")
         ttk.Spinbox(controls, textvariable=self.interval, width=5, from_=1, to=3600).pack(side="left", padx=6)
         self.start_button = ttk.Button(controls, text="자동화 시작", command=self.start,
                                        style="Primary.TButton")
@@ -670,7 +716,7 @@ class Controller:
             self.settings_window.lift()
             return
         window = self.settings_window = tk.Toplevel(self.root)
-        window.title(f"{APP_NAME} · 설정")
+        window.title(f"{APP_NAME} · 알림 설정")
         window.configure(bg=OCEAN)
         window.transient(self.root)
         window.resizable(False, False)
@@ -682,6 +728,22 @@ class Controller:
             draft[key] = tk.BooleanVar(window, value=self.notification_settings[key])
             ttk.Checkbutton(panel, text=label, variable=draft[key], style="Ocean.TCheckbutton").pack(
                 anchor="w", pady=(8, 0))
+        ttk.Label(
+            panel, wraplength=355, justify="left",
+            text="방해 금지 중에도 팝업을 받으려면 Windows 알림 설정의 "
+                 "‘우선 순위 알림 설정 → 앱 추가’에서 PCfishMate를 선택하세요. "
+                 "앱이 목록에 없으면 첫 알림을 받은 뒤 다시 확인하세요.",
+        ).pack(anchor="w", pady=(12, 6))
+
+        def open_windows_notifications():
+            try:
+                os.startfile("ms-settings:notifications")
+            except OSError:
+                messagebox.showinfo("Windows 알림 설정",
+                                    "Windows 설정 → 시스템 → 알림에서 열 수 있어요.", parent=window)
+
+        ttk.Button(panel, text="Windows 알림 설정 열기",
+                   command=open_windows_notifications).pack(anchor="w")
         buttons = ttk.Frame(panel)
         buttons.pack(anchor="e", pady=(14, 0))
 
@@ -713,39 +775,23 @@ class Controller:
         self.notification_settings = settings
         return True
 
-    def open_merge_options(self):
-        if self.merge_options_window is not None and self.merge_options_window.winfo_exists():
-            self.merge_options_window.lift()
-            return
-        window = self.merge_options_window = tk.Toplevel(self.root)
-        window.title(f"{APP_NAME} · 자동 합성 옵션")
-        window.transient(self.root)
-        panel = ttk.Frame(window, padding=16)
-        panel.pack(fill="both", expand=True)
-        saved = [*self.merge_filters, *self.merge_rarities, self.same_merge_stars, self.same_merge]
-        draft = [tk.BooleanVar(window, value=flag.get()) for flag in saved]
-        for heading, labels, flags in (
-            ("자동 등록 조건", ("남은 교배 횟수가 0인 물고기만 등록", "수조에 배치된 물고기는 제외",
-                              "시즌 물고기는 제외", "시즌 물고기 재료는 제외"), draft[:4]),
-            ("종 희귀도 조건", RARITIES[1:], draft[4:9]),
-            ("재료 조합", ("같은 별 등급 10마리만 합성", "같은 희귀도 10마리만 합성"), draft[9:]),
+    def build_merge_options(self, panel, divider):
+        for heading, labels, flags, columns in (
+            ("자동 등록 조건", ("남은 교배 0회만", "수조 배치 제외",
+                              "시즌 물고기 제외", "시즌 재료 제외"), self.merge_filters, 4),
+            ("종 희귀도 조건", RARITIES[1:], self.merge_rarities, 5),
+            ("재료 조합", ("같은 별 등급 10마리만 합성", "같은 희귀도 10마리만 합성"),
+             (self.same_merge_stars, self.same_merge), 2),
         ):
-            group = ttk.LabelFrame(panel, text=heading, padding=8)
-            group.pack(fill="x", pady=4)
-            for label, flag in zip(labels, flags):
-                ttk.Checkbutton(group, text=label, variable=flag,
-                                style="Ocean.TCheckbutton").pack(anchor="w", pady=3)
-        ttk.Label(panel, text="재료가 모이면 일반 합성과 별 등급을 자동으로 선택합니다.").pack(anchor="w", pady=6)
-        def apply():
-            for flag, value in zip(saved, draft):
-                flag.set(value.get())
-            self.update_modes()
-            window.destroy()
-
-        buttons = ttk.Frame(panel)
-        buttons.pack(anchor="e")
-        ttk.Button(buttons, text="취소", command=window.destroy).pack(side="left", padx=6)
-        ttk.Button(buttons, text="확인", command=apply, style="Primary.TButton").pack(side="left")
+            if panel.winfo_children():
+                divider(parent=panel)
+            ttk.Label(panel, text=heading).pack(anchor="w", pady=(4, 1))
+            group = ttk.Frame(panel)
+            group.pack(fill="x")
+            for index, (label, flag) in enumerate(zip(labels, flags)):
+                ttk.Checkbutton(group, text=label, variable=flag, style="Ocean.TCheckbutton",
+                                command=self.update_modes).grid(
+                    row=index // columns, column=index % columns, sticky="w", padx=(0, 6))
 
     def mode_settings(self):
         zero, placed, season, materials = (flag.get() for flag in self.merge_filters)
@@ -998,7 +1044,7 @@ class Controller:
             self.status.set("실행할 자동화 기능을 하나 이상 선택하세요.")
             return
         try:
-            interval = int(self.interval.get()) if modes["Breed"] else 10
+            interval = int(self.interval.get()) if modes["Breed"] or modes["AutoMerge"] else 10
             if not 1 <= interval <= 3600:
                 raise ValueError
         except ValueError:
@@ -1049,9 +1095,39 @@ class Controller:
         self.stop()
         self.root.destroy()
 
+    def update_heart_status(self, state):
+        count = state.get("HeartCount")
+        maximum = state.get("HeartMax")
+        if type(count) is not int or count < 0:
+            self.heart_row.pack_forget()
+            return
+        known_max = type(maximum) is int and maximum > 0
+        display = (count, maximum if known_max else None)
+        if display != self.heart_display:
+            for icon in self.heart_icons.winfo_children():
+                icon.destroy()
+            if known_max and maximum <= 10:
+                for index in range(maximum):
+                    filled = index < count
+                    image = self.heart_images.get(filled)
+                    tk.Label(self.heart_icons, bg=PANEL, fg=TEXT, image=image or "",
+                             text="" if image else ("♥" if filled else "♡")).pack(side="left", padx=1)
+            self.heart_display = display
+        label = f"교배 하트 {count}/{maximum}" if known_max else f"교배 하트 {count}개"
+        next_at = state.get("NextHeartAt")
+        if known_max and count >= maximum:
+            label += " · 가득 참"
+        elif type(next_at) is int and next_at > 0:
+            seconds = max(0, next_at - int(time.time()))
+            minutes, seconds = divmod(seconds, 60)
+            label += f" · 다음 하트까지 {minutes}분 {seconds:02d}초"
+        self.heart_text.set(label)
+        self.heart_row.pack(anchor="w", padx=12, pady=(0, 7))
+
     def tick_status(self):
         self.connected = False
         self.incompatible = False
+        heart_state = {}
         try:
             path = BRIDGE / "status.json"
             connected = time.time() - path.stat().st_mtime < 5
@@ -1071,6 +1147,7 @@ class Controller:
                     self.status.set("새 모듈을 적용하려면 게임을 다시 시작하세요.")
                 else:
                     self.connected = True
+                    heart_state = state
                     self.connection_deadline = None
                     if self.command:
                         self.write(self.command)
@@ -1078,6 +1155,7 @@ class Controller:
                 self.status.set("게임 플러그인 연결 대기 중")
         except (OSError, ValueError, KeyError):
             self.status.set("게임 플러그인 연결 대기 중")
+        self.update_heart_status(heart_state)
         if self.connection_deadline is not None:
             if time.monotonic() < self.connection_deadline:
                 self.status.set("게임 시작 중 · 모듈이 연결되면 자동화를 시작합니다.")

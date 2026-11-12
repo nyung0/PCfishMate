@@ -47,6 +47,7 @@ public sealed class Plugin : BasePlugin
     private string mergeFailure = "", breedFailure = "", upgradeFailure = "";
     private bool bridgeReadFailed;
     private bool mergeSlotsOwned, breedSlotsOwned;
+    private (int Max, long Interval)? heartConfig;
 
     [DllImport("user32.dll")]
     private static extern short GetAsyncKeyState(int key);
@@ -233,6 +234,7 @@ public sealed class Plugin : BasePlugin
             if (requested != bridgeEnabled)
                 Record(requested ? "자동화 시작" : "자동화 중지", "컨트롤러");
             bridgeEnabled = requested;
+            var hearts = ReadHeartStatus();
             var status = Path.Combine(bridge, "status.json");
             var temporary = status + ".tmp";
             File.WriteAllText(temporary, JsonSerializer.Serialize(new {
@@ -243,6 +245,9 @@ public sealed class Plugin : BasePlugin
                       || (command?.TankUpgrade == true && upgradeHookReady && !upgradeFailed)
                     : enabled.Value && !breedFailed,
                 Message = message,
+                HeartCount = hearts.Count,
+                HeartMax = hearts.Max,
+                NextHeartAt = hearts.NextAt,
                 MergeMessage = bridgeEnabled && command?.AutoMerge == true ? mergeMessage : "",
                 FeatureErrors = new[] {
                     command?.Breed != false ? breedFailure : "",
@@ -774,6 +779,51 @@ public sealed class Plugin : BasePlugin
             ? candidates.OrderByDescending(item => item.Stars).ThenByDescending(item => item.Rarity)
             : candidates.OrderByDescending(item => item.Rarity).ThenByDescending(item => item.Stars);
         return ordered.DistinctBy(item => item.Id);
+    }
+
+    private (int? Count, int? Max, long? NextAt) ReadHeartStatus()
+    {
+        if (data is null)
+            return (null, null, null);
+
+        int count;
+        try
+        {
+            if (Read(data, "breedCount") is not int current || current < 0)
+                return (null, null, null);
+            count = current;
+        }
+        catch (Exception)
+        {
+            return (null, null, null);
+        }
+
+        try
+        {
+            if (heartConfig is null)
+            {
+                var type = data.GetType().Assembly.GetType("NN.PF.Core.GameConfig", throwOnError: true)!;
+                const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static;
+                object? ConfigValue(string name) =>
+                    type.GetProperty(name, flags)?.GetValue(null) ?? type.GetField(name, flags)?.GetValue(null);
+                var maximum = Convert.ToInt32(ConfigValue("CF_BREED_MAX_COUNT"), CultureInfo.InvariantCulture);
+                var seconds = Convert.ToInt64(ConfigValue("CF_BREED_COUNT_INTERVAL"), CultureInfo.InvariantCulture);
+                if (maximum <= 0 || seconds <= 0)
+                    return (count, null, null);
+                heartConfig = (maximum, seconds);
+            }
+            var (max, interval) = heartConfig.Value;
+            if (count >= max)
+                return (count, max, null);
+
+            var stamp = Convert.ToInt64(Read(data, "breedTimestamp"), CultureInfo.InvariantCulture);
+            long? next = stamp > 0 ? checked(stamp + interval) : null;
+            return (count, max, next);
+        }
+        catch (Exception)
+        {
+            return (count, heartConfig?.Max, null);
+        }
     }
 
     private static bool Active(object behaviour) =>

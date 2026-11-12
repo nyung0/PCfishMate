@@ -12,6 +12,11 @@ ACCENT = "#FFCE70"
 TEXT = "#F2F7FF"
 MUTED = "#B5C8E3"
 RARITY_COLORS = (MUTED, TEXT, "#8CE1A8", "#8BD9FF", "#FFD177", "#EDABFF")
+CATALOG_CARD_COLORS = {
+    "undiscovered": ("#172F50", "#507193", MUTED),
+    "discovered": ("#393449", "#D6A660", "#FFCE70"),
+    "owned": ("#15445A", "#67D6B0", "#A2F0D0"),
+}
 
 
 def rounded_image(root, width, height, radius, fill, outline=None, bevel=False):
@@ -93,8 +98,13 @@ def ocean_style(root):
     checked = rounded_image(root, 16, 16, 4, "#3475AB", EDGE)
     for x, y in ((4, 8), (5, 9), (6, 10), (7, 9), (8, 8), (9, 7), (10, 6), (11, 5)):
         checked.put(TEXT, to=(x, y, x + 1, y + 2))
-    root.check_images = (empty, checked)
-    style.element_create("Ocean.indicator", "image", empty, ("selected", checked))
+    root.check_images = []
+    for icon in (empty, checked):
+        indicator = tk.PhotoImage(master=root, width=icon.width() + 5, height=icon.height())
+        indicator.tk.call(indicator, "copy", icon)
+        root.check_images.append(indicator)
+    style.element_create("Ocean.indicator", "image", root.check_images[0],
+                         ("selected", root.check_images[1]))
     style.layout("Ocean.TCheckbutton", [("Checkbutton.padding", {"sticky": "nswe", "children": [
         ("Ocean.indicator", {"side": "left", "sticky": ""}),
         ("Checkbutton.label", {"side": "left", "sticky": "w"}),
@@ -155,12 +165,15 @@ class CardGrid(ttk.Frame):
         width = max(self.card_width, canvas.winfo_width())
         columns = max(1, width // self.card_width)
         step = width / columns
-        for i, (name, rarity, stars, detail, picture, owned) in enumerate(self.cards):
+        for i, (name, rarity, stars, detail, picture, state) in enumerate(self.cards):
             row, column = divmod(i, columns)
             x, y = column * step + 4, row * 122 + 4
             center = x + (step - 8) / 2
+            visible = bool(state) and state != "undiscovered"
+            fill, outline, detail_color = CATALOG_CARD_COLORS.get(
+                state, (PANEL, EDGE, TEXT) if visible else ("#172F50", "#507193", MUTED))
             rounded_card(canvas, x, y, x + step - 8, y + 112,
-                         fill=PANEL if owned else "#172F50", outline=EDGE if owned else "#507193")
+                         fill=fill, outline=outline)
             if picture:
                 canvas.create_image(center, y + 26, image=picture)
             if self.toggle_favorite is not None:
@@ -173,12 +186,12 @@ class CardGrid(ttk.Frame):
                                    fill=ACCENT if favorite else MUTED,
                                    font=("Segoe UI Symbol", 12), tags=tag)
             canvas.create_text(center, y + 60, text=name, width=int(step - 18),
-                               fill=TEXT if owned else MUTED, font=("Malgun Gothic", 9, "bold"))
+                               fill=TEXT if visible else MUTED, font=("Malgun Gothic", 9, "bold"))
             grade = "★" * stars if stars else "—"
             canvas.create_text(center, y + 83, text=f"{RARITIES[rarity]}  {grade}",
-                               fill=RARITY_COLORS[rarity] if owned else MUTED,
+                               fill=RARITY_COLORS[rarity] if visible else MUTED,
                                font=("Malgun Gothic", 9))
-            canvas.create_text(center, y + 101, text=detail, fill=TEXT if owned else MUTED,
+            canvas.create_text(center, y + 101, text=detail, fill=detail_color,
                                font=("Malgun Gothic", 9))
         rows = (len(self.cards) + columns - 1) // columns
         canvas.configure(scrollregion=(0, 0, width, rows * 122))

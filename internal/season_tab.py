@@ -23,6 +23,32 @@ def load_grade_icon(install):
     return None
 
 
+def load_automation_icons(install):
+    sizes = {
+        "Icon_BreedCountOn": 20, "Icon_BreedCountOff": 20,
+        "Icon_BreedHeart": 16, "Icon_LvUp": 16, "Icon_Merge": 16,
+    }
+    icons = {}
+    assets = UnityPy.load(str(install / "PCFish_Data/sharedassets0.assets"))
+    for obj in assets.objects:
+        if obj.type.name != "Sprite":
+            continue
+        name = obj.peek_name()
+        if name not in sizes:
+            continue
+        icon = obj.read().image.convert("RGBA")
+        size = sizes[name]
+        if size == 16 and (bounds := icon.getbbox()):
+            icon = icon.crop(bounds)
+        icon.thumbnail((size, size), Image.Resampling.NEAREST)
+        with BytesIO() as buffer:
+            icon.save(buffer, format="PNG")
+            icons[name] = buffer.getvalue()
+        if len(icons) == len(sizes):
+            break
+    return icons
+
+
 def load_install_fish(install):
     assets = UnityPy.load(str(install / "PCFish_Data/sharedassets0.assets"))
     for obj in assets.objects:
