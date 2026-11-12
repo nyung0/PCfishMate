@@ -312,34 +312,54 @@ def setup_game(root):
         return previous
 
     wizard = tk.Toplevel(root)
-    wizard.title(f"{APP_NAME} · 초기 설정")
+    wizard.title(f"{APP_NAME} 설치 마법사")
     wizard.resizable(False, False)
-    panel = ttk.Frame(wizard, padding=22)
-    panel.pack(fill="both", expand=True)
-    ttk.Label(panel, text=f"{APP_NAME} 설치 설정", font=("Malgun Gothic", 16, "bold")).pack(anchor="w")
+    if (ASSETS / "pcfish.ico").is_file():
+        wizard.iconbitmap(str(ASSETS / "pcfish.ico"))
+    header = ttk.Frame(wizard, padding=(24, 18, 24, 14))
+    header.pack(fill="x")
+    heading = tk.StringVar()
+    subtitle = tk.StringVar()
+    ttk.Label(header, textvariable=heading, font=("Malgun Gothic", 16, "bold")).pack(anchor="w")
+    ttk.Label(header, textvariable=subtitle).pack(anchor="w", pady=(4, 0))
+    ttk.Separator(wizard).pack(fill="x")
+    content = ttk.Frame(wizard, padding=(24, 16))
+    content.pack(fill="both", expand=True)
+    terms = ttk.Frame(content)
+    panel = ttk.Frame(content)
+    terms.grid(row=0, column=0, sticky="nsew")
+    panel.grid(row=0, column=0, sticky="nsew")
+    content.columnconfigure(0, weight=1)
+    content.rowconfigure(0, weight=1)
+    ttk.Label(panel, text="PC FISH 설치 폴더", font=("Malgun Gothic", 10, "bold")).pack(anchor="w")
     path = tk.StringVar(value=str(previous or find_game()))
     row = ttk.Frame(panel)
     row.pack(fill="x", pady=10)
-    ttk.Entry(row, width=53, textvariable=path).pack(side="left", fill="x", expand=True)
+    path_entry = ttk.Entry(row, width=53, textvariable=path)
+    path_entry.pack(side="left", fill="x", expand=True)
 
     def pick():
         chosen = filedialog.askdirectory(parent=wizard, initialdir=path.get())
         if chosen:
             path.set(chosen)
 
-    ttk.Button(row, text="폴더 선택", command=pick).pack(side="left", padx=(8, 0))
+    browse = ttk.Button(row, text="찾아보기…", command=pick)
+    browse.pack(side="left", padx=(8, 0))
+    ttk.Label(panel, text="PC FISH를 종료한 뒤 설치를 진행하세요. Windows에서 관리자 권한을 요청할 수 있어요.",
+              wraplength=510, justify="left").pack(anchor="w", pady=(2, 10))
     notices = (
-        "PCfishMate는 비공식 도구입니다. Steam 약관 제4조는 게임 진행이나 보상을 얻는 자동화를 금지하며, 위반 시 계정이나 구독이 제한될 수 있습니다. 아래 확인은 Valve나 게임사의 허가를 대신하지 않습니다.",
-        "게임을 종료한 뒤 진행해 주세요. 설치·갱신 시 선택한 게임 폴더에 BepInEx와 모듈을 설치하고, 필요한 경우 로더 설정과 Unity 캐시를 변경합니다. Windows 관리자 권한과 라이브러리 다운로드가 필요할 수 있습니다.",
-        "자동화는 게임에서 교배·수조 레벨업·합성을 실행합니다. 합성은 재료 물고기를 소비할 수 있으니 시작 전에 조건을 확인하세요.",
-        "도감은 게임 파일과 저장 데이터를 로컬에서 읽습니다. 즐겨찾기·설정·자동화 기록은 이 PC에 저장됩니다. Windows 알림을 켜면 시작 메뉴 바로가기와 알림 발신자가 등록될 수 있습니다. 업데이트 확인은 GitHub에 접속합니다.",
+        ("Steam 이용 약관", "PCfishMate는 비공식 도구입니다. Steam 약관 제4조는 진행이나 보상을 얻는 자동화를 금지하며, 위반 시 계정이나 구독이 제한될 수 있습니다. 설치 동의는 게임 폴더 변경에 적용됩니다."),
+        ("게임 폴더 변경", "선택한 게임 폴더에 BepInEx와 모듈을 설치하거나 갱신합니다. 필요한 경우 로더 설정과 Unity 캐시를 변경하고 라이브러리를 다운로드합니다."),
+        ("자동화와 데이터", "교배·수조 레벨업·합성을 자동으로 실행할 수 있고, 합성은 재료 물고기를 소비합니다. 도감은 게임 파일과 저장 데이터를 읽으며, 즐겨찾기·설정·기록은 이 PC에 보관합니다."),
+        ("알림과 업데이트", "Windows 알림을 켜면 시작 메뉴 바로가기와 알림 발신자가 등록될 수 있습니다. 업데이트 확인은 GitHub에 접속합니다."),
     )
-    for notice in notices:
-        ttk.Label(panel, text=notice, wraplength=510, justify="left").pack(anchor="w", pady=(0, 7))
-    ttk.Button(panel, text="Steam 이용 약관 제4조 보기",
+    for title, notice in notices:
+        ttk.Label(terms, text=title, font=("Malgun Gothic", 10, "bold")).pack(anchor="w")
+        ttk.Label(terms, text=notice, wraplength=510, justify="left").pack(anchor="w", pady=(2, 8))
+    ttk.Button(terms, text="Steam 이용 약관 제4조 보기",
                command=lambda: webbrowser.open(STEAM_TERMS)).pack(anchor="w", pady=(0, 8))
     consent = tk.BooleanVar()
-    ttk.Checkbutton(panel, text="안내를 확인했고 모듈 설치·갱신에 동의합니다.",
+    ttk.Checkbutton(terms, text="안내를 확인했고 모듈 설치·갱신에 동의합니다.",
                     variable=consent).pack(anchor="w")
     status = tk.StringVar()
     ttk.Label(panel, textvariable=status, wraplength=475).pack(anchor="w", pady=8)
@@ -366,12 +386,6 @@ def setup_game(root):
         progress.create_line(3, 9, x, 9, fill="#64C3E0", width=2)
         if progress_fish is not None:
             progress.create_image(x, 15, image=progress_fish)
-        else:
-            progress.create_polygon(x - 4, 15, x - 14, 8, x - 14, 22,
-                                    fill="#FFB35C", outline="#814523")
-            progress.create_oval(x - 8, 7, x + 14, 23, fill="#FF9A45", outline="#814523")
-            progress.create_line(x - 1, 8, x - 1, 22, fill="#FFF0D3", width=3)
-            progress.create_oval(x + 6, 11, x + 9, 14, fill="#23344C", width=0)
 
     def set_progress(value):
         nonlocal progress_value
@@ -380,8 +394,13 @@ def setup_game(root):
         draw_progress()
 
     progress.bind("<Configure>", draw_progress)
-    buttons = ttk.Frame(panel)
-    buttons.pack(anchor="e")
+    ttk.Separator(wizard).pack(fill="x")
+    footer = ttk.Frame(wizard, padding=(24, 10))
+    footer.pack(fill="x")
+    step = tk.StringVar()
+    ttk.Label(footer, textvariable=step).pack(side="left")
+    buttons = ttk.Frame(footer)
+    buttons.pack(side="right")
     result = None
     handle = None
 
@@ -404,23 +423,8 @@ def setup_game(root):
         result = game
         wizard.destroy()
 
-    def load_fish(game, images):
-        try:
-            image = load_install_fish(game)
-        except Exception:
-            return  # Game artwork is optional during installation.
-        if image is not None:
-            images.put(image)
-
-    def poll(game, images):
-        nonlocal handle, progress_socket, progress_fish
-        try:
-            image = images.get_nowait()
-        except Empty:
-            pass
-        else:
-            progress_fish = ImageTk.PhotoImage(image, master=wizard)
-            draw_progress()
+    def poll(game):
+        nonlocal handle, progress_socket
         while True:
             try:
                 packet = progress_socket.recv(128).decode("ascii", errors="replace")
@@ -435,7 +439,7 @@ def setup_game(root):
         wait.restype = wintypes.DWORD
         code = wait(handle, 0)
         if code == 258:
-            wizard.after(250, poll, game, images)
+            wizard.after(250, poll, game)
             return
         exit_code = wintypes.DWORD(1)
         get_exit = kernel.GetExitCodeProcess
@@ -451,8 +455,14 @@ def setup_game(root):
             wizard.after(350, finish, game)
         else:
             progress.pack_forget()
-            install.state(["!disabled"])
+            set_installing(False)
             status.set("설치를 완료하지 못했습니다. 게임을 종료하고 다시 시도하세요.")
+
+    def set_installing(active):
+        for control in (install, back, cancel_button, browse, path_entry):
+            control.state(["disabled" if active else "!disabled"])
+        heading.set("모듈 설치 중" if active else "설치 위치 선택")
+        subtitle.set("설치가 완료되면 PCfishMate가 열려요." if active else "PC FISH가 설치된 Steam 폴더를 선택하세요.")
 
     def begin():
         nonlocal handle, progress_socket, progress_token, progress_value, progress_fish
@@ -466,6 +476,13 @@ def setup_game(root):
         if ready_game(game):
             finish(game)
             return
+        progress_fish = None
+        try:
+            image = load_install_fish(game)
+            if image is not None:
+                progress_fish = ImageTk.PhotoImage(image, master=wizard)
+        except Exception:
+            pass  # Installation can still show progress when the game artwork is unavailable.
         try:
             progress_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             progress_socket.bind(("127.0.0.1", 0))
@@ -478,18 +495,46 @@ def setup_game(root):
                 progress_socket = None
             status.set(str(error))
             return
-        install.state(["disabled"])
+        set_installing(True)
         progress_value = 0
-        progress_fish = None
-        progress.pack(before=buttons, fill="x", pady=(0, 10))
+        progress.pack(fill="x", pady=(0, 10))
         set_progress(0)
-        images = Queue()
-        Thread(target=load_fish, args=(game, images), daemon=True).start()
-        wizard.after(250, poll, game, images)
+        wizard.after(250, poll, game)
 
-    ttk.Button(buttons, text="취소", command=cancel).pack(side="left", padx=6)
-    install = ttk.Button(buttons, text="설치 및 실행", command=begin)
-    install.pack(side="left")
+    def show_terms():
+        panel.grid_remove()
+        terms.grid()
+        heading.set("PCfishMate 설치 안내")
+        subtitle.set("설치 전에 아래 내용을 확인해 주세요.")
+        step.set("1 / 2")
+        back.state(["disabled"])
+        install.configure(text="다음 >", command=show_location)
+        update_next()
+
+    def show_location():
+        if consent.get():
+            terms.grid_remove()
+            panel.grid()
+            step.set("2 / 2")
+            set_installing(False)
+            install.configure(text="설치 및 실행", command=begin)
+            status.set("")
+
+    def update_next(*_):
+        if step.get() == "1 / 2":
+            install.state(["!disabled" if consent.get() else "disabled"])
+
+    back = ttk.Button(buttons, text="< 이전", command=show_terms)
+    back.pack(side="left", padx=(0, 6))
+    install = ttk.Button(buttons, width=14)
+    install.pack(side="left", padx=(0, 6))
+    cancel_button = ttk.Button(buttons, text="취소", command=cancel)
+    cancel_button.pack(side="left")
+    consent.trace_add("write", update_next)
+    show_terms()
+    wizard.update_idletasks()
+    content.rowconfigure(0, minsize=terms.winfo_reqheight())
+    content.columnconfigure(0, minsize=terms.winfo_reqwidth())
     wizard.protocol("WM_DELETE_WINDOW", cancel)
     root.wait_window(wizard)
     return result
@@ -545,16 +590,16 @@ class Controller:
         tabs.pack(fill="both", expand=True, padx=12, pady=12)
         panel = ttk.Frame(tabs, padding=16)
         tabs.add(panel, text="자동화")
-        season = SeasonTab(tabs, self.game_path)
-        tabs.add(season, text="시즌합성")
         self.catalog_tab = catalog = CatalogTab(tabs, self.game_path, BRIDGE / "favorites.json")
+        season = SeasonTab(tabs, self.game_path, catalog)
+        tabs.add(season, text="시즌합성")
         tabs.add(catalog, text="도감")
 
         def refresh_tab(_event):
             active = tabs.select()
             for tab in (season, catalog):
                 if active == str(tab):
-                    tab.refresh()
+                    tab.after_idle(tab.refresh)
 
         tabs.bind("<<NotebookTabChanged>>", refresh_tab)
         self.status = tk.StringVar(value="게임 플러그인 연결 대기 중")

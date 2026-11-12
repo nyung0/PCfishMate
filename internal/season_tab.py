@@ -1,4 +1,4 @@
-from collections import Counter
+from collections import Counter, defaultdict
 from io import BytesIO
 from pathlib import Path
 from queue import Empty, Queue
@@ -94,9 +94,12 @@ def load_season_art(game, install):
 
 
 class SeasonTab(ttk.Frame):
-    def __init__(self, parent, game_path):
+    def __init__(self, parent, game_path, catalog):
         super().__init__(parent, padding=16)
         self.game_path = game_path
+        self.catalog = catalog
+        self.material_variants = defaultdict(list)
+        self.visible_materials = []
         self.result = Queue()
         self.loading = False
         self.install = None
@@ -109,14 +112,18 @@ class SeasonTab(ttk.Frame):
         self.recipe = ttk.Combobox(self, state="readonly")
         self.recipe.pack(fill="x", pady=(10, 4))
         self.recipe.bind("<<ComboboxSelected>>", lambda _: self.draw())
+        self.favorites_only = tk.BooleanVar(value=False)
+        ttk.Checkbutton(self, text="즐겨찾기만", style="Ocean.TCheckbutton",
+                        variable=self.favorites_only, command=self.draw).pack(anchor="w", pady=(0, 4))
         ttk.Label(self, textvariable=self.summary, wraplength=640).pack(anchor="w", pady=(0, 8))
-        self.grid_view = CardGrid(self)
+        self.grid_view = CardGrid(self, card_width=124, toggle_favorite=self.toggle_favorite)
         self.grid_view.pack(fill="both", expand=True)
         self.after(200, self.poll)
 
     def refresh(self):
         if self.loading or not self.winfo_viewable():
             return
+        self.draw()
         install = Path(self.game_path.get())
         game = self.game if install == self.install else None
         if game is None:
@@ -154,6 +161,9 @@ class SeasonTab(ttk.Frame):
                 self.install, self.game, self.stock = install, game, stock
                 if art is not None:
                     self.variants, images = art
+                    self.material_variants.clear()
+                    for variant, (species, _, stars) in game.variants.items():
+                        self.material_variants[game.names.get(species, species), stars].append(variant)
                     self.images = {key: tk.PhotoImage(master=self, data=data) for key, data in images.items()}
                     self.recipes = sorted(game.recipes, key=lambda key: (-key[0], key[1], key[2]))
                     self.recipe["values"] = [f"시즌 {s} · {name} · {stars}성" for s, name, stars in self.recipes]
@@ -163,6 +173,11 @@ class SeasonTab(ttk.Frame):
                 self.draw()
         self.after(200, self.poll)
         self.after(1800, self.refresh)
+
+    def toggle_favorite(self, index):
+        if 0 <= index < len(self.visible_materials):
+            self.catalog.toggle_variants(self.visible_materials[index])
+            self.draw()
 
     def draw(self):
         if self.stock is None:
@@ -174,17 +189,33 @@ class SeasonTab(ttk.Frame):
             return
         recipe = self.game.recipes[self.recipes[index]]
         counts = tuple(min(need, self.stock[key]) for key, need in recipe.items())
-        view = (index, counts)
+        only_favorites = self.favorites_only.get()
+        marks = tuple(any(variant in self.catalog.favorites for variant in self.material_variants.get(key, ()))
+                      for key in recipe)
+        notice = self.catalog.favorites_status.get()
+        view = (index, only_favorites, counts, marks, notice)
         if view == self.view:
             return
-        reset = self.view is None or self.view[0] != index
+        reset = self.view is None or self.view[:2] != view[:2]
         self.view = view
         cards = []
-        for ((name, stars), need), have in zip(recipe.items(), counts):
+        favorites = []
+        self.visible_materials = []
+        for ((name, stars), need), have, marked in zip(recipe.items(), counts, marks):
+            if only_favorites and not marked:
+                continue
             rarity, variant = self.variants.get((name, stars), (0, None))
+            variants = self.material_variants.get((name, stars), ())
             for slot in range(need):
                 owned = slot < have
                 cards.append((name, rarity, stars, "보유" if owned else "부족",
                               self.images.get((variant, owned)), owned))
-        self.summary.set(f"보유 재료 {sum(counts)} / {sum(recipe.values())}마리 · 컬러 보유 / 흑백 부족")
-        self.grid_view.set_cards(cards, reset)
+                favorites.append(marked if variants else None)
+                self.visible_materials.append(variants)
+        summary = f"보유 재료 {sum(counts)} / {sum(recipe.values())}마리 · 컬러 보유 / 흑백 부족"
+        if only_favorites and not cards:
+            summary += "\n이 레시피에 즐겨찾기한 재료가 없어요."
+        if notice:
+            summary += f"\n{notice}"
+        self.summary.set(summary)
+        self.grid_view.set_cards(cards, reset, favorites=favorites)

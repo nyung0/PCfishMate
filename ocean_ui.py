@@ -176,7 +176,7 @@ class CardGrid(ttk.Frame):
                          fill=fill, outline=outline)
             if picture:
                 canvas.create_image(center, y + 26, image=picture)
-            if self.toggle_favorite is not None:
+            if self.toggle_favorite is not None and self.favorites[i] is not None:
                 favorite = self.favorites[i]
                 right = x + step - 8
                 tag = f"favorite-{i}"

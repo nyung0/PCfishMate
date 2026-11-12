@@ -154,7 +154,12 @@ class CatalogTab(ttk.Frame):
     def toggle_favorite(self, index):
         if not 0 <= index < len(self.visible_variants):
             return
-        variants = set(self.visible_variants[index])
+        self.toggle_variants(self.visible_variants[index])
+
+    def toggle_variants(self, variants):
+        variants = set(variants)
+        if not variants:
+            return
         marked = not self.favorites.intersection(variants)
         updated = self.favorites | variants if marked else self.favorites - variants
         self.favorites_pending.update(dict.fromkeys(variants, marked))

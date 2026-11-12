@@ -37,20 +37,15 @@ jobs:
         run: |
           $tag = (Get-Content internal/release-version.txt -Raw).Trim()
           $notes = @'
-          ### 🐟 도감과 자동화 화면 개선
+          ### 🐠 설치와 시즌합성 개선
 
-          - 도감 카드에서 미발견, 발견·미보유, 보유 상태를 색과 문구로 구분해요.
-          - 이름 검색과 함께 **색상 합쳐 보기**를 켜고 끌 수 있어요.
-          - 자동화 탭에 교배 하트와 다음 회복 시간, 인게임 아이콘을 표시해요.
-          - 교배·합성 옵션은 한 번에 하나씩 펼쳐지고, 합성 옵션은 체크 즉시 적용돼요.
-          - 합성만 실행할 때도 **교배·합성 간격**에 입력한 값을 적용해요.
-          - 체크박스 여백을 넓히고 **알림 설정**에 Windows 알림 설정 바로가기를 추가했어요.
+          - 설치 안내와 게임 폴더 선택을 두 단계로 나눴어요.
+          - 설치 진행 바는 처음부터 인게임 산호 흰동가리를 표시해요.
+          - 시즌합성 재료에 즐겨찾기를 추가하고 도감과 같은 목록을 사용해요.
+          - 시즌합성 카드 폭을 줄여 한 줄에 더 많은 재료를 보여줘요.
 
-          ### 설치
-
-          게임을 종료하고 `PCfishMate.exe`를 실행해요. 설치 안내를 확인하면 산호 흰동가리와 함께 설치 진행률을 볼 수 있어요.
-
-          [Steam 이용약관 제4조](https://store.steampowered.com/subscriber_agreement/#4)에서 자동화 관련 제한을 확인할 수 있어요.
+          PC FISH를 종료하고 `PCfishMate.exe`를 실행한 뒤 설치 안내를 확인해 주세요.
+          [Steam 이용약관 제4조](https://store.steampowered.com/subscriber_agreement/#4)
           '@
           gh release create $tag dist/PCfishMate.exe dist/SHA256SUMS.txt --target $env:GITHUB_SHA --title "PCfishMate $tag" --notes "$notes"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
