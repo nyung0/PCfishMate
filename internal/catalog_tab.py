@@ -1,6 +1,5 @@
 from collections import defaultdict
 from io import BytesIO
-from itertools import permutations
 import json
 import logging
 from pathlib import Path
@@ -17,8 +16,8 @@ from ocean_ui import CardGrid, RARITIES
 from pc_fish_data import GameData
 
 
-SORT_FIELDS = ("가나다순", "희귀도순", "별 등급순")
-SORT_ORDERS = tuple(permutations(range(len(SORT_FIELDS))))
+SORT_LABELS = ("가나다순", "가나다 역순", "희귀도 낮은 순", "희귀도 높은 순",
+               "별 등급 낮은 순", "별 등급 높은 순")
 
 
 def catalog_stock(state):
@@ -117,21 +116,26 @@ class CatalogTab(ttk.Frame):
 
         controls = ttk.Frame(self)
         controls.pack(fill="x", pady=(8, 4))
-        ttk.Label(controls, text="정렬").pack(side="left", padx=(0, 8))
-        self.sort = ttk.Combobox(
-            controls, state="readonly", width=29,
-            values=[" → ".join(SORT_FIELDS[field] for field in order) for order in SORT_ORDERS])
-        self.sort.current(0)
-        self.sort.pack(side="left")
-        self.sort.bind("<<ComboboxSelected>>", lambda _: self.draw())
-        ttk.Checkbutton(controls, text="즐겨찾기만", style="Ocean.TCheckbutton",
-                        variable=self.favorites_only, command=self.draw).pack(side="left", padx=12)
+        ttk.Label(controls, text="정렬", style="Section.TLabel").pack(side="left", padx=(0, 8))
+        self.sort_order = [0, 2, 4]
+        self.sort_boxes = []
+        for position, choice in enumerate(self.sort_order):
+            ttk.Label(controls, text=f"{position + 1}순위").pack(side="left", padx=(0, 4))
+            box = ttk.Combobox(controls, state="readonly", width=15, values=SORT_LABELS)
+            box.current(choice)
+            box.bind("<<ComboboxSelected>>", lambda _, index=position: self.select_sort(index))
+            box.pack(side="left", padx=(0, 8))
+            self.sort_boxes.append(box)
+        filters_row = ttk.Frame(self)
+        filters_row.pack(fill="x", pady=(0, 4))
+        ttk.Checkbutton(filters_row, text="즐겨찾기만", style="Ocean.TCheckbutton",
+                        variable=self.favorites_only, command=self.draw).pack(side="left", padx=(0, 12))
         self.combine_colors = tk.BooleanVar(value=False)
-        ttk.Checkbutton(controls, text="색상 합쳐 보기", style="Ocean.TCheckbutton",
+        ttk.Checkbutton(filters_row, text="색상 합쳐 보기", style="Ocean.TCheckbutton",
                         variable=self.combine_colors, command=self.draw).pack(side="left")
         search = ttk.Frame(self)
         search.pack(fill="x", pady=(0, 6))
-        ttk.Label(search, text="이름 검색").pack(side="left", padx=(0, 8))
+        ttk.Label(search, text="이름 검색", style="Section.TLabel").pack(side="left", padx=(0, 8))
         self.query = tk.StringVar()
         ttk.Entry(search, textvariable=self.query).pack(side="left", fill="x", expand=True)
         ttk.Button(search, text="지우기", command=lambda: self.query.set("")).pack(side="left", padx=(6, 0))
@@ -194,6 +198,17 @@ class CatalogTab(ttk.Frame):
         self.filters[rarity].configure(style="Primary.TButton")
         self.draw()
 
+    def select_sort(self, position):
+        chosen = self.sort_boxes[position].current()
+        previous = self.sort_order[position]
+        for other, value in enumerate(self.sort_order):
+            if other != position and value // 2 == chosen // 2:
+                self.sort_order[other] = previous
+                self.sort_boxes[other].current(previous)
+                break
+        self.sort_order[position] = chosen
+        self.draw()
+
     def refresh_periodically(self):
         self.refresh()
         self.after(1800, self.refresh_periodically)
@@ -253,13 +268,12 @@ class CatalogTab(ttk.Frame):
             return
         discovered, totals = self.stock
         query = "".join(self.query.get().casefold().split())
-        options = self.rarity, self.sort.current(), self.favorites_only.get(), self.combine_colors.get(), query
+        options = self.rarity, tuple(self.sort_order), self.favorites_only.get(), self.combine_colors.get(), query
         view = options, self.stock, self.favorites, self.stock_available
         if view == self.view:
             return
         reset = self.view is None or options != self.view[0]
         self.view = view
-        order = SORT_ORDERS[options[1]]
         groups = {}
         for variant, (species, rarity, stars) in self.game.variants.items():
             if not 1 <= rarity < len(RARITIES) or (self.rarity is not None and rarity != self.rarity):
@@ -269,7 +283,10 @@ class CatalogTab(ttk.Frame):
                 continue
             key = (name, rarity, stars, "" if options[3] else variant)
             groups.setdefault(key, []).append(variant)
-        entries = sorted(groups, key=lambda entry: tuple(entry[field] for field in order) + (entry[3],))
+        entries = sorted(groups)
+        for choice in reversed(self.sort_order):
+            field, descending = divmod(choice, 2)
+            entries.sort(key=lambda entry: entry[field], reverse=bool(descending))
         cards = []
         favorite_cards = []
         found_count = owned_count = 0

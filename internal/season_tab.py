@@ -112,9 +112,6 @@ class SeasonTab(ttk.Frame):
         self.recipe = ttk.Combobox(self, state="readonly")
         self.recipe.pack(fill="x", pady=(10, 4))
         self.recipe.bind("<<ComboboxSelected>>", lambda _: self.draw())
-        self.favorites_only = tk.BooleanVar(value=False)
-        ttk.Checkbutton(self, text="즐겨찾기만", style="Ocean.TCheckbutton",
-                        variable=self.favorites_only, command=self.draw).pack(anchor="w", pady=(0, 4))
         ttk.Label(self, textvariable=self.summary, wraplength=640).pack(anchor="w", pady=(0, 8))
         self.grid_view = CardGrid(self, card_width=124, toggle_favorite=self.toggle_favorite)
         self.grid_view.pack(fill="both", expand=True)
@@ -189,21 +186,18 @@ class SeasonTab(ttk.Frame):
             return
         recipe = self.game.recipes[self.recipes[index]]
         counts = tuple(min(need, self.stock[key]) for key, need in recipe.items())
-        only_favorites = self.favorites_only.get()
         marks = tuple(any(variant in self.catalog.favorites for variant in self.material_variants.get(key, ()))
                       for key in recipe)
         notice = self.catalog.favorites_status.get()
-        view = (index, only_favorites, counts, marks, notice)
+        view = (index, counts, marks, notice)
         if view == self.view:
             return
-        reset = self.view is None or self.view[:2] != view[:2]
+        reset = self.view is None or self.view[0] != index
         self.view = view
         cards = []
         favorites = []
         self.visible_materials = []
         for ((name, stars), need), have, marked in zip(recipe.items(), counts, marks):
-            if only_favorites and not marked:
-                continue
             rarity, variant = self.variants.get((name, stars), (0, None))
             variants = self.material_variants.get((name, stars), ())
             for slot in range(need):
@@ -213,8 +207,6 @@ class SeasonTab(ttk.Frame):
                 favorites.append(marked if variants else None)
                 self.visible_materials.append(variants)
         summary = f"보유 재료 {sum(counts)} / {sum(recipe.values())}마리 · 컬러 보유 / 흑백 부족"
-        if only_favorites and not cards:
-            summary += "\n이 레시피에 즐겨찾기한 재료가 없어요."
         if notice:
             summary += f"\n{notice}"
         self.summary.set(summary)

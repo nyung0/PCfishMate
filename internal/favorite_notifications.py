@@ -1,6 +1,7 @@
 import base64
 import ctypes
 from ctypes import wintypes
+from io import BytesIO
 import logging
 import os
 from pathlib import Path
@@ -11,8 +12,9 @@ import winreg
 from xml.etree import ElementTree as ET
 from uuid import uuid4
 
-from catalog_tab import catalog_art
+from PIL import Image, ImageOps
 
+from catalog_tab import catalog_art
 
 APP_ID = "PCFish.Automation.Pink"
 DEFAULT_NOTIFICATION_SETTINGS = {"windows": False, "taskbar": False}
@@ -138,7 +140,7 @@ def register_notification_shortcut(executable):
         winreg.SetValueEx(key, "PCfishMateShortcutTarget", 0, winreg.REG_SZ, str(executable))
 
 
-def show_fish_toast(name, picture=None):
+def show_fish_toast(name, picture=None, *, stars=None):
     with SHORTCUT_LOCK:
         if getattr(sys, "frozen", False):
             try:
@@ -153,7 +155,8 @@ def show_fish_toast(name, picture=None):
 
     toast = ET.Element("toast")
     binding = ET.SubElement(ET.SubElement(toast, "visual"), "binding", template="ToastGeneric")
-    ET.SubElement(binding, "text").text = f"{name} 나왔다!"
+    label = name if stars is None else f"{stars}성 {name}"
+    ET.SubElement(binding, "text").text = f"{label} 나왔다!"
     if picture is not None and picture.is_file():
         ET.SubElement(binding, "image", placement="appLogoOverride", src=picture.resolve().as_uri())
     env = os.environ.copy()
@@ -173,18 +176,22 @@ def show_fish_toast(name, picture=None):
 def notify_favorites(game, cache, notifications, enabled):
     pictures = {}
     try:
-        pictures = catalog_art(game, {variant for variant, _ in notifications})
+        pictures = catalog_art(game, {variant for variant, _, _ in notifications})
         cache.mkdir(parents=True, exist_ok=True)
     except Exception:
         logging.exception("Could not prepare favorite fish artwork")
-    for variant, name in notifications:
+    for variant, name, stars in notifications:
         if not enabled():
             return
         picture = None
         if (variant, True) in pictures:
             temporary = cache / f"{uuid4().hex}.tmp"
             try:
-                temporary.write_bytes(pictures[variant, True])
+                with Image.open(BytesIO(pictures[variant, True])) as source:
+                    fish = ImageOps.contain(source.convert("RGBA"), (80, 80), Image.Resampling.NEAREST)
+                icon = Image.new("RGBA", (128, 128))
+                icon.paste(fish, ((128 - fish.width) // 2, (128 - fish.height) // 2))
+                icon.save(temporary, format="PNG")
                 picture = temporary.replace(cache / f"{variant}.png")
             except OSError:
                 logging.exception("Could not cache favorite fish artwork")
@@ -194,7 +201,7 @@ def notify_favorites(game, cache, notifications, enabled):
                 except OSError:
                     pass
         try:
-            show_fish_toast(name, picture)
+            show_fish_toast(name, picture, stars=stars)
         except (OSError, KeyError, subprocess.SubprocessError) as error:
             logging.exception("Could not show favorite fish notification")
             try:

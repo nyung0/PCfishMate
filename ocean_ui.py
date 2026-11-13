@@ -49,6 +49,7 @@ def ocean_style(root):
     style = ttk.Style(root)
     style.theme_use("clam")
     style.configure(".", background=OCEAN, foreground=TEXT, font=("Malgun Gothic", 10))
+    style.configure("Section.TLabel", font=("Malgun Gothic", 10, "bold"), foreground="#A9D6FF")
     root.button_images = []
     for name, button_style, colors, outline in (
         ("Ocean", "TButton", ("#285F96", "#367BB8", "#194570"), "#163755"),

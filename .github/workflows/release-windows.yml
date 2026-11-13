@@ -37,14 +37,19 @@ jobs:
         run: |
           $tag = (Get-Content internal/release-version.txt -Raw).Trim()
           $notes = @'
-          ### 🐠 설치와 시즌합성 개선
+          ### 🐟 교배, 도감, 알림 개선
 
-          - 설치 안내와 게임 폴더 선택을 두 단계로 나눴어요.
-          - 설치 진행 바는 처음부터 인게임 산호 흰동가리를 표시해요.
-          - 시즌합성 재료에 즐겨찾기를 추가하고 도감과 같은 목록을 사용해요.
-          - 시즌합성 카드 폭을 줄여 한 줄에 더 많은 재료를 보여줘요.
+          - 교배 우선순위를 세 단계로 정하고, 희귀도·별 등급·남은 교배 횟수의 정렬 방향을 고를 수 있어요.
+          - 도감 정렬도 세 단계로 바꿨어요. 시즌합성에서는 모든 재료를 보면서 즐겨찾기할 수 있어요.
+          - 즐겨찾기 알림에 별 등급을 표시하고, 물고기 이미지에 여백을 넣었어요.
+          - 설치 안내와 약관은 펼쳐볼 수 있어요.
 
-          PC FISH를 종료하고 `PCfishMate.exe`를 실행한 뒤 설치 안내를 확인해 주세요.
+          ### 업데이트
+
+          - 인증서 오류가 나면 Windows HTTPS 경로로 다시 시도해요.
+          - **알림 설정 → 자동 업데이트**를 켜면 새 버전을 받고, 게임 종료 후 앱을 재시작해 적용해요.
+          - 기존 앱에서 업데이트 확인이 실패하면 이 페이지에서 `PCfishMate.exe`를 받을 수 있어요.
+
           [Steam 이용약관 제4조](https://store.steampowered.com/subscriber_agreement/#4)
           '@
           gh release create $tag dist/PCfishMate.exe dist/SHA256SUMS.txt --target $env:GITHUB_SHA --title "PCfishMate $tag" --notes "$notes"

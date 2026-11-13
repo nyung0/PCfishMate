@@ -183,7 +183,7 @@ public sealed class Plugin : BasePlugin
 
     private sealed record Command(string RunId, bool Enabled, int Interval, int[]? Rarities,
         bool? Breed, bool TankUpgrade, bool StarsFirst, bool SameBreedRarity, bool AutoMerge, MergeOptions? Merge,
-        int[]? BreedStars, bool SameBreedStars);
+        int[]? BreedStars, bool SameBreedStars, int[]? BreedPriorities);
     private sealed record MergeOptions(bool SameRarity, bool ZeroBreeds, bool ExcludePlaced,
         bool ExcludeSeason, bool ExcludeSeasonMaterials, int[]? Rarities, string[]? SeasonIds,
         string[]? SeasonMaterials, bool? SameStars);
@@ -756,7 +756,7 @@ public sealed class Plugin : BasePlugin
             ? (command.Rarities ?? Array.Empty<int>()).ToHashSet()
             : grades.Value.Split(',').Select(value => int.TryParse(value, out int rank) ? rank : -1).ToHashSet();
         var now = DateTimeOffset.UtcNow;
-        var candidates = new List<(string Id, int Rarity, int Stars)>();
+        var candidates = new List<(string Id, int Rarity, int Stars, int Remaining)>();
         for (int i = 0; i < count; i++)
         {
             var item = Item(fish, i);
@@ -767,18 +767,35 @@ public sealed class Plugin : BasePlugin
             int stars = (int)Read(item, "Grade")!;
             if (!allowed.Contains(rarity) || (bridgeEnabled && command?.BreedStars?.Contains(stars) == false))
                 continue;
-            if (rarity != 0 && (int)Read(item, "BreedCount")! <= 0)
+            int remaining = (int)Read(item, "BreedCount")!;
+            if (remaining <= 0)
                 continue;
             if (Read(item, "BreedNextDatetime") is string { Length: > 0 } date &&
                 (!DateTimeOffset.TryParse(date, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var ready)
                  || ready > now))
                 continue;
-            candidates.Add((id, rarity, stars));
+            candidates.Add((id, rarity, stars, remaining));
         }
-        var ordered = bridgeEnabled && command?.StarsFirst == true
-            ? candidates.OrderByDescending(item => item.Stars).ThenByDescending(item => item.Rarity)
-            : candidates.OrderByDescending(item => item.Rarity).ThenByDescending(item => item.Stars);
-        return ordered.DistinctBy(item => item.Id);
+        var priorities = bridgeEnabled ? command?.BreedPriorities : null;
+        if (priorities is not { Length: 3 } || priorities.Any(value => value < 0 || value > 5)
+            || priorities.Select(value => value / 2).Distinct().Count() != 3)
+            priorities = bridgeEnabled && command?.StarsFirst == true ? new[] { 2, 0 } : new[] { 0, 2 };
+
+        IOrderedEnumerable<(string Id, int Rarity, int Stars, int Remaining)>? ordered = null;
+        foreach (int priority in priorities)
+        {
+            int Key((string Id, int Rarity, int Stars, int Remaining) item) => priority switch
+            {
+                0 => -item.Rarity,
+                1 => item.Rarity,
+                2 => -item.Stars,
+                3 => item.Stars,
+                4 => item.Remaining,
+                _ => -item.Remaining,
+            };
+            ordered = ordered is null ? candidates.OrderBy(Key) : ordered.ThenBy(Key);
+        }
+        return ordered!.DistinctBy(item => item.Id).Select(item => (item.Id, item.Rarity, item.Stars));
     }
 
     private (int? Count, int? Max, long? NextAt) ReadHeartStatus()

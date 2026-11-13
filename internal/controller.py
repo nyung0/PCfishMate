@@ -4,6 +4,7 @@ import ctypes
 import re
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -15,6 +16,7 @@ import stat
 import webbrowser
 from collections import Counter
 from urllib.parse import urlsplit
+from urllib.error import URLError
 from queue import Empty, Queue
 from threading import Thread
 from pathlib import Path
@@ -22,8 +24,9 @@ from tkinter import filedialog, messagebox, ttk
 from uuid import uuid4
 from datetime import datetime
 from hashlib import file_digest
+from http.client import HTTPException
 from ctypes import wintypes
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 from PIL import ImageTk
 if not getattr(sys, "frozen", False):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -38,11 +41,86 @@ BRIDGE = Path(os.environ["LOCALAPPDATA"]) / "PCFishHelper" / "internal"
 APP_NAME = "PCfishMate"
 RELEASE_PAGE = "https://github.com/nyung0/PCfishMate/releases/latest"
 RELEASE_API = "https://api.github.com/repos/nyung0/PCfishMate/releases/latest"
+RELEASE_TAG_PATH = "/nyung0/PCfishMate/releases/tag/"
+RELEASE_DOWNLOAD = "https://github.com/nyung0/PCfishMate/releases/download"
 STEAM_TERMS = "https://store.steampowered.com/subscriber_agreement/#4"
 INSTALL_NOTICE_VERSION = 1
 DEFAULT_GAME = Path(r"C:\Program Files (x86)\Steam\steamapps\common\PC FISH")
 ASSETS = Path(__file__).resolve().parent
 LOADER_FILES = ("BepInEx", "dotnet", ".doorstop_version", "doorstop_config.ini", "winhttp.dll")
+
+
+def release_version(tag):
+    if not isinstance(tag, str) or not re.fullmatch(r"v?\d+\.\d+\.\d+", tag):
+        raise ValueError("릴리스 버전 형식을 확인할 수 없습니다.")
+    return tuple(map(int, tag.lstrip("v").split(".")))
+
+
+def certificate_error(error):
+    reason = error.reason if isinstance(error, URLError) else error
+    return isinstance(reason, ssl.SSLCertVerificationError)
+
+
+def windows_https(url, *, timeout, output=None, redirect_only=False):
+    curl = Path(os.environ["SystemRoot"]) / "System32" / "curl.exe"
+    command = [str(curl), "-q", "--fail", "--silent", "--show-error", "--location",
+               "--proto", "=https", "--proto-redir", "=https", "--max-redirs", "8",
+               "--max-time", str(timeout), "--user-agent", APP_NAME]
+    if redirect_only:
+        command.extend(["--output", os.devnull, "--write-out", "%{url_effective}"])
+    elif output is not None:
+        command.extend(["--output", str(output)])
+    else:
+        command.extend(["--header", "Accept: application/vnd.github+json"])
+    try:
+        response = subprocess.run([*command, url], capture_output=True, check=True,
+                                  timeout=timeout + 2, creationflags=subprocess.CREATE_NO_WINDOW)
+    except subprocess.CalledProcessError as error:
+        details = error.stderr.decode("utf-8", errors="replace").strip()
+        raise OSError(f"Windows HTTPS 연결 실패 · {details or error.returncode}") from error
+    except subprocess.TimeoutExpired as error:
+        raise OSError("Windows HTTPS 연결 시간이 초과되었습니다.") from error
+    return response.stdout
+
+
+def latest_release():
+    try:
+        request = Request(RELEASE_API, headers={
+            "Accept": "application/vnd.github+json", "User-Agent": APP_NAME,
+        })
+        try:
+            with urlopen(request, timeout=10) as response:
+                release = json.load(response)
+        except OSError as error:
+            if not certificate_error(error):
+                raise
+            release = json.loads(windows_https(RELEASE_API, timeout=10))
+        tag = release["tag_name"]
+        release_version(tag)
+        asset = next((item for item in release["assets"] if item["name"] == "PCfishMate.exe"), None)
+        return tag, asset
+    except (OSError, ValueError, KeyError, TypeError, HTTPException) as api_error:
+        try:
+            try:
+                with urlopen(RELEASE_PAGE, timeout=10) as response:
+                    destination = urlsplit(response.geturl())
+            except OSError as error:
+                if not certificate_error(error):
+                    raise
+                destination = urlsplit(windows_https(RELEASE_PAGE, timeout=10, redirect_only=True).decode("ascii"))
+            if destination.scheme != "https" or destination.netloc != "github.com" or not destination.path.startswith(RELEASE_TAG_PATH):
+                raise ValueError("공식 최신 릴리스 주소를 확인할 수 없습니다.")
+            tag = destination.path.removeprefix(RELEASE_TAG_PATH)
+            release_version(tag)
+            return tag, None
+        except (OSError, ValueError, HTTPException) as page_error:
+            raise ValueError(f"GitHub API: {api_error}\n최신 릴리스 페이지: {page_error}") from page_error
+
+
+def verified_update_asset(tag, asset):
+    expected = f"{RELEASE_DOWNLOAD}/{tag}/PCfishMate.exe"
+    return (isinstance(asset, dict) and asset.get("browser_download_url") == expected
+            and bool(re.fullmatch(r"sha256:[0-9a-f]{64}", str(asset.get("digest") or ""))))
 
 
 def set_taskbar_icon(root, icon):
@@ -186,12 +264,17 @@ def installer_asset(name):
     return ASSETS / name
 
 
+def game_is_running():
+    tasklist = Path(os.environ["SystemRoot"]) / "System32" / "tasklist.exe"
+    processes = subprocess.check_output([str(tasklist), "/FI", "IMAGENAME eq PCFish.exe", "/NH"],
+                                        timeout=5, creationflags=subprocess.CREATE_NO_WINDOW)
+    return b"pcfish.exe" in processes.lower()
+
+
 def install_module(game, report=lambda step: None):
     if not (game / "PCFish.exe").is_file() or not (game / "GameAssembly.dll").is_file():
         raise ValueError("PCFish.exe가 있는 게임 폴더를 선택하세요.")
-    processes = subprocess.check_output(["tasklist", "/FI", "IMAGENAME eq PCFish.exe", "/NH"],
-                                        creationflags=subprocess.CREATE_NO_WINDOW)
-    if b"pcfish.exe" in processes.lower():
+    if game_is_running():
         raise ValueError("게임을 종료한 뒤 모듈을 설치하세요.")
     present = [name for name in LOADER_FILES if (game / name).exists()]
     if present and len(present) != len(LOADER_FILES):
@@ -329,7 +412,7 @@ def setup_game(root):
     panel = ttk.Frame(content)
     terms.grid(row=0, column=0, sticky="nsew")
     panel.grid(row=0, column=0, sticky="nsew")
-    content.columnconfigure(0, weight=1)
+    content.columnconfigure(0, weight=1, minsize=510)
     content.rowconfigure(0, weight=1)
     ttk.Label(panel, text="PC FISH 설치 폴더", font=("Malgun Gothic", 10, "bold")).pack(anchor="w")
     path = tk.StringVar(value=str(previous or find_game()))
@@ -353,14 +436,30 @@ def setup_game(root):
         ("자동화와 데이터", "교배·수조 레벨업·합성을 자동으로 실행할 수 있고, 합성은 재료 물고기를 소비합니다. 도감은 게임 파일과 저장 데이터를 읽으며, 즐겨찾기·설정·기록은 이 PC에 보관합니다."),
         ("알림과 업데이트", "Windows 알림을 켜면 시작 메뉴 바로가기와 알림 발신자가 등록될 수 있습니다. 업데이트 확인은 GitHub에 접속합니다."),
     )
+    ttk.Label(terms, wraplength=510, justify="left",
+              text="선택한 PC FISH 폴더에 게임 모듈을 설치하거나 갱신해요. "
+                   "자동화 사용 시 Steam 계정이나 구독이 제한될 수 있어요.").pack(anchor="w", pady=(0, 10))
+    details = ttk.Frame(terms)
     for title, notice in notices:
-        ttk.Label(terms, text=title, font=("Malgun Gothic", 10, "bold")).pack(anchor="w")
-        ttk.Label(terms, text=notice, wraplength=510, justify="left").pack(anchor="w", pady=(2, 8))
-    ttk.Button(terms, text="Steam 이용 약관 제4조 보기",
+        ttk.Label(details, text=title, font=("Malgun Gothic", 10, "bold")).pack(anchor="w")
+        ttk.Label(details, text=notice, wraplength=510, justify="left").pack(anchor="w", pady=(2, 8))
+    ttk.Button(details, text="Steam 이용 약관 제4조 보기",
                command=lambda: webbrowser.open(STEAM_TERMS)).pack(anchor="w", pady=(0, 8))
+
+    def toggle_details():
+        if details.winfo_manager():
+            details.pack_forget()
+            details_button.configure(text="설치 안내 및 약관 펼쳐보기 ▸")
+        else:
+            details.pack(before=consent_check, fill="x", pady=(0, 8))
+            details_button.configure(text="설치 안내 및 약관 접기 ▾")
+
+    details_button = ttk.Button(terms, text="설치 안내 및 약관 펼쳐보기 ▸", command=toggle_details)
+    details_button.pack(anchor="w", pady=(0, 10))
     consent = tk.BooleanVar()
-    ttk.Checkbutton(terms, text="안내를 확인했고 모듈 설치·갱신에 동의합니다.",
-                    variable=consent).pack(anchor="w")
+    consent_check = ttk.Checkbutton(terms, text="안내를 확인했고 모듈 설치·갱신에 동의합니다.",
+                                    variable=consent)
+    consent_check.pack(anchor="w")
     status = tk.StringVar()
     ttk.Label(panel, textvariable=status, wraplength=475).pack(anchor="w", pady=8)
     progress = tk.Canvas(panel, height=30, highlightthickness=0, bg=panel.winfo_toplevel().cget("bg"))
@@ -532,9 +631,6 @@ def setup_game(root):
     cancel_button.pack(side="left")
     consent.trace_add("write", update_next)
     show_terms()
-    wizard.update_idletasks()
-    content.rowconfigure(0, minsize=terms.winfo_reqheight())
-    content.columnconfigure(0, minsize=terms.winfo_reqwidth())
     wizard.protocol("WM_DELETE_WINDOW", cancel)
     root.wait_window(wizard)
     return result
@@ -545,6 +641,11 @@ class Controller:
         self.root = root
         self.update_result = Queue()
         self.download_result = Queue()
+        self.pending_update = None
+        self.next_auto_check = time.monotonic() + 5
+        self.next_update_apply = 0
+        self.update_restart_at = None
+        self.auto_update_notice = ""
         self.command = None
         self.connection_deadline = None
         self.connected = False
@@ -552,6 +653,7 @@ class Controller:
         self.run_id = uuid4().hex
         self.notification_settings_path = BRIDGE / "notification-settings.json"
         self.notification_settings = DEFAULT_NOTIFICATION_SETTINGS.copy()
+        self.notification_settings["auto_update"] = False
         try:
             saved = json.loads(self.notification_settings_path.read_text(encoding="utf-8"))
             if isinstance(saved, dict):
@@ -676,7 +778,7 @@ class Controller:
             option_buttons.append(button)
         show_options(breed_options)
         self.build_merge_options(merge_options, divider)
-        ttk.Label(breed_options, text="교배 허용 희귀도 · 두 부모 모두 적용").pack(anchor="w", pady=(2, 4))
+        ttk.Label(breed_options, text="교배 허용 희귀도 · 두 부모 모두 적용", style="Section.TLabel").pack(anchor="w", pady=(2, 4))
         grades = ttk.Frame(breed_options)
         grades.pack(anchor="w")
         self.flags = [tk.BooleanVar(value=True) for _ in RARITIES]
@@ -688,7 +790,7 @@ class Controller:
             ttk.Checkbutton(grades, text=grade, variable=flag,
                             style=rarity_style, command=self.update_modes).pack(side="left", padx=(0, 8))
         divider(parent=breed_options)
-        ttk.Label(breed_options, text="교배 허용 별 등급 · 두 부모 모두 적용").pack(anchor="w", pady=(5, 2))
+        ttk.Label(breed_options, text="교배 허용 별 등급 · 두 부모 모두 적용", style="Section.TLabel").pack(anchor="w", pady=(5, 2))
         stars = ttk.Frame(breed_options)
         stars.pack(anchor="w")
         try:
@@ -719,17 +821,35 @@ class Controller:
         divider(parent=breed_options)
         priority = ttk.Frame(breed_options)
         priority.pack(anchor="w", pady=(2, 0))
-        ttk.Label(priority, text="교배 우선순위").pack(side="left", padx=(0, 8))
-        self.priority = ttk.Combobox(priority, state="readonly", width=34,
-                                    values=("희귀도 높은 순 → 별 등급 높은 순", "별 등급 높은 순 → 희귀도 높은 순"))
-        self.priority.current(0)
-        self.priority.bind("<<ComboboxSelected>>", lambda _: self.update_modes())
-        self.priority.pack(side="left")
+        ttk.Label(priority, text="교배 우선순위", style="Section.TLabel").pack(side="left", padx=(0, 8))
+        labels = ("희귀도 높은 순", "희귀도 낮은 순", "별 등급 높은 순", "별 등급 낮은 순",
+                  "남은 교배 적은 순", "남은 교배 많은 순")
+        self.breed_priorities = [0, 2, 4]
+        priority_boxes = []
+
+        def select_priority(position):
+            chosen = priority_boxes[position].current()
+            previous = self.breed_priorities[position]
+            for other, value in enumerate(self.breed_priorities):
+                if other != position and value // 2 == chosen // 2:
+                    self.breed_priorities[other] = previous
+                    priority_boxes[other].current(previous)
+                    break
+            self.breed_priorities[position] = chosen
+            self.update_modes()
+
+        for position, choice in enumerate(self.breed_priorities):
+            ttk.Label(priority, text=f"{position + 1}순위").pack(side="left", padx=(0, 4))
+            box = ttk.Combobox(priority, state="readonly", width=15, values=labels)
+            box.current(choice)
+            box.bind("<<ComboboxSelected>>", lambda _, index=position: select_priority(index))
+            box.pack(side="left", padx=(0, 8))
+            priority_boxes.append(box)
         divider(major=True)
         controls = ttk.Frame(panel)
         controls.pack(anchor="w", pady=10)
         self.interval = tk.StringVar(value="10")
-        ttk.Label(controls, text="교배·합성 간격 (초)").pack(side="left")
+        ttk.Label(controls, text="교배·합성 간격 (초)", style="Section.TLabel").pack(side="left")
         ttk.Spinbox(controls, textvariable=self.interval, width=5, from_=1, to=3600).pack(side="left", padx=6)
         self.start_button = ttk.Button(controls, text="자동화 시작", command=self.start,
                                        style="Primary.TButton")
@@ -737,7 +857,7 @@ class Controller:
         ttk.Button(controls, text="중지", command=self.stop, style="Stop.TButton").pack(side="left")
         ttk.Button(controls, text="로그 보기", command=self.open_log).pack(side="left", padx=6)
         divider(major=True)
-        ttk.Label(panel, text="자동화 기록").pack(anchor="w", pady=(6, 4))
+        ttk.Label(panel, text="자동화 기록", style="Section.TLabel").pack(anchor="w", pady=(6, 4))
         history_panel = ttk.Frame(panel)
         history_panel.pack(fill="both", expand=True)
         self.history = ttk.Treeview(history_panel, columns=("time", "kind", "detail"), show="headings")
@@ -789,6 +909,13 @@ class Controller:
 
         ttk.Button(panel, text="Windows 알림 설정 열기",
                    command=open_windows_notifications).pack(anchor="w")
+        ttk.Separator(panel).pack(fill="x", pady=10)
+        draft["auto_update"] = tk.BooleanVar(window, value=self.notification_settings["auto_update"])
+        ttk.Checkbutton(panel, text="자동 업데이트", style="Ocean.TCheckbutton",
+                        variable=draft["auto_update"]).pack(anchor="w")
+        ttk.Label(panel, wraplength=355, justify="left",
+                  text="새 버전을 자동으로 받고, 게임을 종료하면 앱을 다시 시작해 적용해요.").pack(
+                      anchor="w", pady=(4, 0))
         buttons = ttk.Frame(panel)
         buttons.pack(anchor="e", pady=(14, 0))
 
@@ -817,6 +944,8 @@ class Controller:
                 pass
         if self.notification_settings["taskbar"] and not settings["taskbar"]:
             flash_taskbar(self.root, enabled=False)
+        if settings["auto_update"] and not self.notification_settings["auto_update"]:
+            self.next_auto_check = time.monotonic()
         self.notification_settings = settings
         return True
 
@@ -830,7 +959,7 @@ class Controller:
         ):
             if panel.winfo_children():
                 divider(parent=panel)
-            ttk.Label(panel, text=heading).pack(anchor="w", pady=(4, 1))
+            ttk.Label(panel, text=heading, style="Section.TLabel").pack(anchor="w", pady=(4, 1))
             group = ttk.Frame(panel)
             group.pack(fill="x")
             for index, (label, flag) in enumerate(zip(labels, flags)):
@@ -848,7 +977,8 @@ class Controller:
             "AutoMerge": self.merge_enabled.get(), "SameBreedRarity": self.same_breed.get(),
             "SameBreedStars": self.same_breed_stars.get(),
             "BreedStars": [i for i, flag in enumerate(self.breed_star_flags) if flag.get()],
-            "StarsFirst": self.priority.current() == 1,
+            "StarsFirst": self.breed_priorities[0] // 2 == 1,
+            "BreedPriorities": self.breed_priorities.copy(),
             "Rarities": [i for i, flag in enumerate(self.flags) if flag.get()],
             "Merge": {"SameRarity": self.same_merge.get(), "SameStars": self.same_merge_stars.get(),
                       "ZeroBreeds": zero,
@@ -857,91 +987,167 @@ class Controller:
                       "SeasonIds": season_ids, "SeasonMaterials": material_ids},
         }
 
-    def check_update(self):
+    def check_update(self, automatic=False):
         self.update_button.state(["disabled"])
 
         def fetch():
             try:
                 version_file = ASSETS / "release-version.txt"
                 current = version_file.read_text(encoding="ascii").strip() if version_file.is_file() else "v0.5.1"
-                with urlopen(RELEASE_API, timeout=10) as response:
-                    release = json.load(response)
-                latest = release["tag_name"]
-                versions = []
-                for version in (current, latest):
-                    if not re.fullmatch(r"v?\d+\.\d+\.\d+", version):
-                        raise ValueError("릴리스 버전 형식을 확인할 수 없습니다.")
-                    versions.append(tuple(map(int, version.lstrip("v").split("."))))
-                asset = next((item for item in release["assets"] if item["name"] == "PCfishMate.exe"), None)
-                self.update_result.put((current, latest, versions[1] > versions[0], asset, None))
-            except (OSError, ValueError, KeyError, TypeError) as error:
-                self.update_result.put((None, None, False, None, str(error)))
+                latest, asset = latest_release()
+                self.update_result.put((current, latest, release_version(latest) > release_version(current),
+                                        asset, None, automatic))
+            except (OSError, ValueError) as error:
+                self.update_result.put((None, None, False, None, str(error), automatic))
 
         Thread(target=fetch, daemon=True).start()
 
     def show_update_result(self):
         try:
-            current, latest, newer, asset, error = self.update_result.get_nowait()
+            current, latest, newer, asset, error, automatic = self.update_result.get_nowait()
         except Empty:
             return
         self.update_button.state(["!disabled"])
+        if automatic:
+            if error:
+                self.auto_update_notice = "자동 업데이트 확인 실패 · 업데이트 확인에서 다시 시도할 수 있어요."
+                return
+            if self.notification_settings["auto_update"] and newer and verified_update_asset(latest, asset):
+                self.auto_update_notice = ""
+                self.download_update(latest, asset, automatic=True)
+            elif newer:
+                self.auto_update_notice = "자동 업데이트 파일 확인 실패 · 업데이트 확인에서 공식 릴리스를 열 수 있어요."
+            else:
+                self.auto_update_notice = ""
+            return
         if error:
-            messagebox.showerror("업데이트 확인", f"GitHub 릴리스를 확인하지 못했습니다.\n{error}", parent=self.root)
-        elif newer:
-            if messagebox.askyesno("업데이트 확인", f"업데이트 내용이 있습니다. 업데이트 하시겠습니까?\n\n현재 {current} · 최신 {latest}",
+            if messagebox.askyesno("업데이트 확인", f"GitHub 릴리스를 확인하지 못했습니다.\n{error}\n\n브라우저에서 공식 릴리스를 열까요?",
                                    parent=self.root):
-                if getattr(sys, "frozen", False):
+                webbrowser.open(RELEASE_PAGE)
+        elif newer:
+            automatic = getattr(sys, "frozen", False) and verified_update_asset(latest, asset)
+            prompt = ("업데이트 내용이 있습니다. 업데이트 하시겠습니까?" if automatic
+                      else "새 버전이 있습니다. 브라우저에서 공식 릴리스를 열까요?")
+            if messagebox.askyesno("업데이트 확인", f"{prompt}\n\n현재 {current} · 최신 {latest}", parent=self.root):
+                if automatic:
                     self.download_update(latest, asset)
                 else:
                     webbrowser.open(RELEASE_PAGE)
         else:
             messagebox.showinfo("업데이트 확인", f"최신 버전입니다.\n\n현재 버전 {current}", parent=self.root)
 
-    def download_update(self, tag, asset):
+    def download_update(self, tag, asset, automatic=False):
         self.update_button.state(["disabled"])
         self.status.set("업데이트 다운로드 중…")
 
         def fetch():
             staged = None
             try:
-                url = f"https://github.com/nyung0/PCfishMate/releases/download/{tag}/PCfishMate.exe"
-                if not asset or asset.get("browser_download_url") != url:
-                    raise ValueError("공식 Windows 업데이트 파일을 찾을 수 없습니다.")
-                digest = asset.get("digest") or ""
-                if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+                url = f"{RELEASE_DOWNLOAD}/{tag}/PCfishMate.exe"
+                if not verified_update_asset(tag, asset):
                     raise ValueError("업데이트 파일의 SHA-256을 확인할 수 없습니다.")
+                digest = asset["digest"]
                 with tempfile.NamedTemporaryFile(prefix="PCfishMate-update-", suffix=".exe", delete=False) as output:
                     staged = Path(output.name)
-                    with urlopen(url, timeout=30) as response:
+                try:
+                    with urlopen(url, timeout=30) as response, staged.open("wb") as output:
                         if urlsplit(response.url).scheme != "https":
                             raise ValueError("업데이트 다운로드 연결을 확인할 수 없습니다.")
                         shutil.copyfileobj(response, output)
+                except OSError as error:
+                    if not certificate_error(error):
+                        raise
+                    windows_https(url, timeout=180, output=staged)
                 with staged.open("rb") as stream:
                     if file_digest(stream, "sha256").hexdigest() != digest[7:]:
                         raise ValueError("업데이트 파일 검증에 실패했습니다.")
-                self.download_result.put((staged, None))
-            except (OSError, ValueError) as error:
+                self.download_result.put((staged, None, automatic))
+            except (OSError, ValueError, HTTPException) as error:
                 if staged:
-                    staged.unlink(missing_ok=True)
-                self.download_result.put((None, str(error)))
+                    try:
+                        staged.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                self.download_result.put((None, str(error), automatic))
 
         Thread(target=fetch, daemon=True).start()
 
     def finish_update_download(self):
         try:
-            staged, error = self.download_result.get_nowait()
+            staged, error, automatic = self.download_result.get_nowait()
         except Empty:
+            pass
+        else:
+            if error:
+                self.update_button.state(["!disabled"])
+                if automatic:
+                    self.auto_update_notice = "자동 업데이트 다운로드 실패 · 업데이트 확인에서 다시 시도할 수 있어요."
+                elif messagebox.askyesno(
+                        "업데이트 실패", f"{error}\n\n브라우저에서 공식 릴리스를 열까요?", parent=self.root):
+                    webbrowser.open(RELEASE_PAGE)
+                return
+            self.pending_update = staged, automatic
+        if self.pending_update is None:
             return
+        staged, automatic = self.pending_update
+        if automatic:
+            if not self.notification_settings["auto_update"]:
+                self.pending_update = None
+                try:
+                    staged.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                self.update_button.state(["!disabled"])
+                self.update_restart_at = None
+                return
+            now = time.monotonic()
+            if self.command is not None or self.connected:
+                self.update_restart_at = None
+                self.status.set("업데이트 준비 완료 · 게임을 종료하면 적용해요.")
+                return
+            if self.settings_window is not None and self.settings_window.winfo_exists():
+                self.update_restart_at = None
+                return
+            checked_game = now >= self.next_update_apply
+            if checked_game:
+                self.next_update_apply = now + 3
+                try:
+                    if game_is_running():
+                        self.update_restart_at = None
+                        self.status.set("업데이트 준비 완료 · 게임을 종료하면 적용해요.")
+                        return
+                except (OSError, subprocess.SubprocessError):
+                    self.update_restart_at = None
+                    return
+                if self.update_restart_at is None:
+                    self.update_restart_at = now + 30
+            if self.update_restart_at is None:
+                return
+            if not checked_game or now < self.update_restart_at:
+                remaining = max(1, int(self.update_restart_at - now) + 1)
+                self.status.set(f"업데이트 준비 완료 · {remaining}초 후 재시작")
+                return
+        self.pending_update = None
         self.update_button.state(["!disabled"])
-        if error:
-            messagebox.showerror("업데이트 실패", error, parent=self.root)
-            return
         try:
+            target = Path(sys.executable)
+            if target.stat().st_file_attributes & stat.FILE_ATTRIBUTE_READONLY:
+                raise PermissionError("PCfishMate.exe가 읽기 전용으로 설정되어 있습니다.")
+            with tempfile.NamedTemporaryFile(dir=target.parent):
+                pass
             env = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1")
             subprocess.Popen([str(staged), "--apply-update", str(os.getpid()), sys.executable], env=env)
         except OSError as error:
-            staged.unlink(missing_ok=True)
-            messagebox.showerror("업데이트 실패", str(error), parent=self.root)
+            try:
+                staged.unlink(missing_ok=True)
+            except OSError:
+                pass
+            if automatic:
+                self.auto_update_notice = "자동 업데이트 적용 실패 · 업데이트 확인에서 다시 시도할 수 있어요."
+            elif messagebox.askyesno(
+                    "업데이트 실패", f"실행 파일을 교체할 준비를 하지 못했어요.\n{error}\n\n공식 릴리스를 열까요?",
+                    parent=self.root):
+                webbrowser.open(RELEASE_PAGE)
             return
         self.close()
         return True
@@ -1049,8 +1255,8 @@ class Controller:
                         and kind in ("교배 완료", "합성 완료") and isinstance(child, str)
                         and child in self.catalog_tab.favorites and self.catalog
                         and child in self.catalog.variants):
-                    species, _, _ = self.catalog.variants[child]
-                    notifications.append((child, self.catalog.names.get(species, species)))
+                    species, _, stars = self.catalog.variants[child]
+                    notifications.append((child, self.catalog.names.get(species, species), stars))
                     new_records[line] -= 1
                 if kind == "교배 요청":
                     continue
@@ -1137,6 +1343,13 @@ class Controller:
         self.tick_status()
 
     def close(self):
+        if self.pending_update is not None:
+            staged, _ = self.pending_update
+            try:
+                staged.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self.pending_update = None
         self.stop()
         self.root.destroy()
 
@@ -1217,6 +1430,12 @@ class Controller:
         self.show_update_result()
         if self.finish_update_download():
             return
+        if self.notification_settings["auto_update"] and self.auto_update_notice:
+            self.status.set(f"{self.status.get()}\n{self.auto_update_notice}")
+        if (getattr(sys, "frozen", False) and self.notification_settings["auto_update"]
+                and time.monotonic() >= self.next_auto_check and self.update_button.instate(["!disabled"])):
+            self.next_auto_check = time.monotonic() + 1800
+            self.check_update(automatic=True)
         self.root.after(1000, self.tick)
 
 
