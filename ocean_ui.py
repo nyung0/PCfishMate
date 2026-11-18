@@ -188,8 +188,10 @@ class CardGrid(ttk.Frame):
                                    font=("Segoe UI Symbol", 12), tags=tag)
             canvas.create_text(center, y + 60, text=name, width=int(step - 18),
                                fill=TEXT if visible else MUTED, font=("Malgun Gothic", 9, "bold"))
-            grade = "★" * stars if stars else "—"
-            canvas.create_text(center, y + 83, text=f"{RARITIES[rarity]}  {grade}",
+            grade = RARITIES[rarity]
+            if stars is not None:
+                grade += "  " + ("★" * stars or "—")
+            canvas.create_text(center, y + 83, text=grade,
                                fill=RARITY_COLORS[rarity] if visible else MUTED,
                                font=("Malgun Gothic", 9))
             canvas.create_text(center, y + 101, text=detail, fill=detail_color,

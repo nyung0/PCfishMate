@@ -26,7 +26,7 @@ def load_grade_icon(install):
 def load_automation_icons(install):
     sizes = {
         "Icon_BreedCountOn": 20, "Icon_BreedCountOff": 20,
-        "Icon_BreedHeart": 16, "Icon_LvUp": 16, "Icon_Merge": 16,
+        "Icon_BreedHeart": 16, "Icon_LvUp": 16, "Icon_Merge": 16, "Icon_Config": 24,
     }
     icons = {}
     assets = UnityPy.load(str(install / "PCFish_Data/sharedassets0.assets"))
@@ -38,9 +38,12 @@ def load_automation_icons(install):
             continue
         icon = obj.read().image.convert("RGBA")
         size = sizes[name]
-        if size == 16 and (bounds := icon.getbbox()):
+        if (size == 16 or name == "Icon_Config") and (bounds := icon.getbbox()):
             icon = icon.crop(bounds)
-        icon.thumbnail((size, size), Image.Resampling.NEAREST)
+        if name == "Icon_Config":
+            icon = ImageOps.contain(icon, (size, size), Image.Resampling.NEAREST)
+        else:
+            icon.thumbnail((size, size), Image.Resampling.NEAREST)
         with BytesIO() as buffer:
             icon.save(buffer, format="PNG")
             icons[name] = buffer.getvalue()
@@ -116,6 +119,11 @@ class SeasonTab(ttk.Frame):
         self.grid_view = CardGrid(self, card_width=124, toggle_favorite=self.toggle_favorite)
         self.grid_view.pack(fill="both", expand=True)
         self.after(200, self.poll)
+        self.after(1800, self.refresh_periodically)
+
+    def refresh_periodically(self):
+        self.refresh()
+        self.after(1800, self.refresh_periodically)
 
     def refresh(self):
         if self.loading or not self.winfo_viewable():
@@ -169,7 +177,6 @@ class SeasonTab(ttk.Frame):
                     self.view = None
                 self.draw()
         self.after(200, self.poll)
-        self.after(1800, self.refresh)
 
     def toggle_favorite(self, index):
         if 0 <= index < len(self.visible_materials):

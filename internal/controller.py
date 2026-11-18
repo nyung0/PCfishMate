@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import tkinter as tk
+from tkinter import font as tkfont
 import zipfile
 import winreg
 import stat
@@ -33,7 +34,7 @@ if not getattr(sys, "frozen", False):
 
 from catalog_tab import CatalogTab, catalog_art
 from favorite_notifications import APP_ID, DEFAULT_NOTIFICATION_SETTINGS, flash_taskbar, notify_favorites
-from ocean_ui import OCEAN, PANEL, RARITIES, RARITY_COLORS, TEXT, WATER, ocean_style
+from ocean_ui import OCEAN, PANEL, RARITIES, RARITY_COLORS, TEXT, WATER, ocean_style, rounded_image
 from season_tab import GameData, SeasonTab, load_automation_icons, load_grade_icon, load_install_fish, load_season_art
 
 
@@ -434,7 +435,7 @@ def setup_game(root):
         ("Steam 이용 약관", "PCfishMate는 비공식 도구입니다. Steam 약관 제4조는 진행이나 보상을 얻는 자동화를 금지하며, 위반 시 계정이나 구독이 제한될 수 있습니다. 설치 동의는 게임 폴더 변경에 적용됩니다."),
         ("게임 폴더 변경", "선택한 게임 폴더에 BepInEx와 모듈을 설치하거나 갱신합니다. 필요한 경우 로더 설정과 Unity 캐시를 변경하고 라이브러리를 다운로드합니다."),
         ("자동화와 데이터", "교배·수조 레벨업·합성을 자동으로 실행할 수 있고, 합성은 재료 물고기를 소비합니다. 도감은 게임 파일과 저장 데이터를 읽으며, 즐겨찾기·설정·기록은 이 PC에 보관합니다."),
-        ("알림과 업데이트", "Windows 알림을 켜면 시작 메뉴 바로가기와 알림 발신자가 등록될 수 있습니다. 업데이트 확인은 GitHub에 접속합니다."),
+        ("알림과 업데이트", "Windows 알림을 켜면 시작 메뉴 바로가기와 알림 발신자가 등록될 수 있습니다. 앱은 GitHub에서 업데이트를 확인합니다. 자동 다운로드가 켜져 있으면 새 버전을 미리 받고, 재시작 후 설치 버튼을 누르면 적용합니다."),
     )
     ttk.Label(terms, wraplength=510, justify="left",
               text="선택한 PC FISH 폴더에 게임 모듈을 설치하거나 갱신해요. "
@@ -643,9 +644,8 @@ class Controller:
         self.download_result = Queue()
         self.pending_update = None
         self.next_auto_check = time.monotonic() + 5
-        self.next_update_apply = 0
-        self.update_restart_at = None
         self.auto_update_notice = ""
+        self.available_update = None
         self.command = None
         self.connection_deadline = None
         self.connected = False
@@ -653,7 +653,7 @@ class Controller:
         self.run_id = uuid4().hex
         self.notification_settings_path = BRIDGE / "notification-settings.json"
         self.notification_settings = DEFAULT_NOTIFICATION_SETTINGS.copy()
-        self.notification_settings["auto_update"] = False
+        self.notification_settings["auto_update"] = True
         try:
             saved = json.loads(self.notification_settings_path.read_text(encoding="utf-8"))
             if isinstance(saved, dict):
@@ -675,18 +675,57 @@ class Controller:
         ocean_style(root)
         title_bar = tk.Frame(root, bg=WATER)
         title_bar.pack(fill="x")
-        header = tk.Label(title_bar, text=APP_NAME, bg=WATER, fg=TEXT,
-                          font=("Malgun Gothic", 17, "bold"), anchor="w", padx=20, pady=12)
         badge = ASSETS / "pcfish-badge.png"
         if badge.is_file():
             self.header_icon = tk.PhotoImage(master=root, file=str(badge))
-            header.configure(image=self.header_icon, compound="left", padx=14)
-        header.pack(side="left")
+            tk.Label(title_bar, image=self.header_icon, bg=WATER, borderwidth=0).pack(
+                side="left", padx=(14, 14), pady=12,
+            )
+        title_text = tk.Frame(title_bar, bg=WATER)
+        title_text.pack(side="left", padx=(0 if badge.is_file() else 20, 0), pady=12)
+        title_font = ("Malgun Gothic", 17, "bold")
+        version_font = ("Malgun Gothic", 9)
+        title_descent = tkfont.Font(root=root, font=title_font).metrics("descent")
+        version_descent = tkfont.Font(root=root, font=version_font).metrics("descent")
+        tk.Label(title_text, text=APP_NAME, bg=WATER, fg=TEXT, font=title_font,
+                 borderwidth=0, padx=0, pady=0).grid(row=0, column=0, sticky="s")
+        try:
+            current_version = (ASSETS / "release-version.txt").read_text(encoding="ascii").strip()
+            release_version(current_version)
+        except (OSError, ValueError):
+            current_version = None
+        self.current_version = current_version
+        tk.Label(title_text, text=current_version or "버전 확인 불가", bg=WATER, fg="#B5C8E3",
+                 font=version_font, borderwidth=0, padx=0, pady=0).grid(
+                     row=0, column=1, sticky="s", padx=(8, 0),
+                     pady=(0, max(0, title_descent - version_descent)),
+                 )
         ttk.Button(title_bar, text="게임 실행",
                    command=lambda: os.startfile("steam://rungameid/4842670")).pack(side="right", padx=16)
-        self.update_button = ttk.Button(title_bar, text="업데이트 확인", command=self.check_update)
-        self.update_button.pack(side="right")
-        ttk.Button(title_bar, text="알림 설정", command=self.open_settings).pack(side="right", padx=(0, 8))
+        style = ttk.Style(root)
+        style.layout("Settings.TButton", [
+            ("Button.padding", {"sticky": "nsew", "children": [("Button.label", {"sticky": "nsew"})]}),
+        ])
+        style.configure("Settings.TButton", font=("Segoe UI Symbol", 18), padding=(8, 8), background=WATER)
+        style.map("Settings.TButton", background=[("active", WATER), ("pressed", WATER)])
+        self.settings_button = ttk.Button(title_bar, text="⚙", style="Settings.TButton",
+                                          cursor="hand2", command=self.open_settings)
+        self.settings_button.pack(side="right", padx=(0, 8))
+        update_normal = rounded_image(root, 12, 12, 3, WATER, "#8CE1A8")
+        update_hover = rounded_image(root, 12, 12, 3, PANEL, TEXT)
+        root.button_images.extend((update_normal, update_hover))
+        style.element_create("UpdateOutline.button", "image", update_normal,
+                             ("active", update_hover), ("focus", update_hover), border=4, padding=1, sticky="nsew")
+        style.layout("UpdateLink.TButton", [("UpdateOutline.button", {"sticky": "nsew", "children": [
+            ("Button.padding", {"sticky": "nsew", "children": [("Button.label", {"sticky": "nsew"})]}),
+        ]})])
+        style.configure("UpdateLink.TButton", font=version_font, foreground="#8CE1A8", padding=(4, 0))
+        style.map("UpdateLink.TButton", foreground=[
+            ("disabled", "#B5C8E3"), ("focus", TEXT), ("active", TEXT),
+        ])
+        self.update_label_bottom = max(0, title_descent - version_descent)
+        self.update_button = ttk.Button(title_text, text="업데이트", style="UpdateLink.TButton",
+                                        cursor="hand2", command=self.check_update)
         self.game_path = tk.StringVar(value=str(game))
         tabs = ttk.Notebook(root)
         tabs.pack(fill="both", expand=True, padx=12, pady=12)
@@ -723,6 +762,8 @@ class Controller:
                                       for name, png in load_automation_icons(game).items()}
         except Exception:
             pass  # Use text when the installed game does not expose these sprites.
+        if settings_icon := self.automation_images.get("Icon_Config"):
+            self.settings_button.configure(image=settings_icon, text="")
         self.heart_images = {
             filled: self.automation_images.get(name)
             for filled, name in ((True, "Icon_BreedCountOn"), (False, "Icon_BreedCountOff"))
@@ -911,10 +952,10 @@ class Controller:
                    command=open_windows_notifications).pack(anchor="w")
         ttk.Separator(panel).pack(fill="x", pady=10)
         draft["auto_update"] = tk.BooleanVar(window, value=self.notification_settings["auto_update"])
-        ttk.Checkbutton(panel, text="자동 업데이트", style="Ocean.TCheckbutton",
+        ttk.Checkbutton(panel, text="업데이트 자동 다운로드", style="Ocean.TCheckbutton",
                         variable=draft["auto_update"]).pack(anchor="w")
         ttk.Label(panel, wraplength=355, justify="left",
-                  text="새 버전을 자동으로 받고, 게임을 종료하면 앱을 다시 시작해 적용해요.").pack(
+                  text="새 버전을 미리 받아요. 설치하려면 게임을 종료하고 재시작 후 설치 버튼을 눌러 주세요.").pack(
                       anchor="w", pady=(4, 0))
         buttons = ttk.Frame(panel)
         buttons.pack(anchor="e", pady=(14, 0))
@@ -987,17 +1028,27 @@ class Controller:
                       "SeasonIds": season_ids, "SeasonMaterials": material_ids},
         }
 
+    def show_update_button(self, label=None):
+        if self.available_update is None:
+            self.update_button.grid_remove()
+            return
+        self.update_button.configure(text=label or "업데이트")
+        if not self.update_button.winfo_manager():
+            self.update_button.grid(row=0, column=2, sticky="s", padx=(8, 0),
+                                    pady=(0, self.update_label_bottom))
+
     def check_update(self, automatic=False):
+        if self.update_button.instate(["disabled"]):
+            return
         self.update_button.state(["disabled"])
 
         def fetch():
             try:
-                version_file = ASSETS / "release-version.txt"
-                current = version_file.read_text(encoding="ascii").strip() if version_file.is_file() else "v0.5.1"
+                current = self.current_version
                 latest, asset = latest_release()
                 self.update_result.put((current, latest, release_version(latest) > release_version(current),
                                         asset, None, automatic))
-            except (OSError, ValueError) as error:
+            except (OSError, ValueError, HTTPException) as error:
                 self.update_result.put((None, None, False, None, str(error), automatic))
 
         Thread(target=fetch, daemon=True).start()
@@ -1008,37 +1059,34 @@ class Controller:
         except Empty:
             return
         self.update_button.state(["!disabled"])
-        if automatic:
-            if error:
-                self.auto_update_notice = "자동 업데이트 확인 실패 · 업데이트 확인에서 다시 시도할 수 있어요."
-                return
-            if self.notification_settings["auto_update"] and newer and verified_update_asset(latest, asset):
-                self.auto_update_notice = ""
-                self.download_update(latest, asset, automatic=True)
-            elif newer:
-                self.auto_update_notice = "자동 업데이트 파일 확인 실패 · 업데이트 확인에서 공식 릴리스를 열 수 있어요."
-            else:
-                self.auto_update_notice = ""
-            return
         if error:
-            if messagebox.askyesno("업데이트 확인", f"GitHub 릴리스를 확인하지 못했습니다.\n{error}\n\n브라우저에서 공식 릴리스를 열까요?",
-                                   parent=self.root):
-                webbrowser.open(RELEASE_PAGE)
-        elif newer:
-            automatic = getattr(sys, "frozen", False) and verified_update_asset(latest, asset)
-            prompt = ("업데이트 내용이 있습니다. 업데이트 하시겠습니까?" if automatic
-                      else "새 버전이 있습니다. 브라우저에서 공식 릴리스를 열까요?")
-            if messagebox.askyesno("업데이트 확인", f"{prompt}\n\n현재 {current} · 최신 {latest}", parent=self.root):
-                if automatic:
-                    self.download_update(latest, asset)
-                else:
-                    webbrowser.open(RELEASE_PAGE)
+            if automatic:
+                self.next_auto_check = time.monotonic() + 60
+            else:
+                messagebox.showerror("업데이트 확인", f"GitHub 릴리스를 확인하지 못했습니다.\n{error}",
+                                     parent=self.root)
+            return
+
+        self.auto_update_notice = ""
+        self.available_update = latest if newer else None
+        self.show_update_button()
+        if not newer:
+            if not automatic:
+                messagebox.showinfo("업데이트 확인", f"최신 버전입니다.\n\n현재 버전 {current}",
+                                    parent=self.root)
+            return
+        if automatic and (not getattr(sys, "frozen", False) or not self.notification_settings["auto_update"]):
+            return
+        if getattr(sys, "frozen", False) and verified_update_asset(latest, asset):
+            self.download_update(latest, asset, automatic=automatic)
+        elif automatic:
+            self.auto_update_notice = "업데이트 파일을 검증할 수 없어요. 업데이트 버튼에서 공식 릴리스를 열 수 있어요."
         else:
-            messagebox.showinfo("업데이트 확인", f"최신 버전입니다.\n\n현재 버전 {current}", parent=self.root)
+            webbrowser.open(RELEASE_PAGE)
 
     def download_update(self, tag, asset, automatic=False):
         self.update_button.state(["disabled"])
-        self.status.set("업데이트 다운로드 중…")
+        self.show_update_button("받는 중…")
 
         def fetch():
             staged = None
@@ -1076,59 +1124,34 @@ class Controller:
         try:
             staged, error, automatic = self.download_result.get_nowait()
         except Empty:
-            pass
-        else:
-            if error:
-                self.update_button.state(["!disabled"])
-                if automatic:
-                    self.auto_update_notice = "자동 업데이트 다운로드 실패 · 업데이트 확인에서 다시 시도할 수 있어요."
-                elif messagebox.askyesno(
-                        "업데이트 실패", f"{error}\n\n브라우저에서 공식 릴리스를 열까요?", parent=self.root):
-                    webbrowser.open(RELEASE_PAGE)
-                return
-            self.pending_update = staged, automatic
-        if self.pending_update is None:
             return
-        staged, automatic = self.pending_update
-        if automatic:
-            if not self.notification_settings["auto_update"]:
-                self.pending_update = None
-                try:
-                    staged.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                self.update_button.state(["!disabled"])
-                self.update_restart_at = None
-                return
-            now = time.monotonic()
-            if self.command is not None or self.connected:
-                self.update_restart_at = None
-                self.status.set("업데이트 준비 완료 · 게임을 종료하면 적용해요.")
-                return
-            if self.settings_window is not None and self.settings_window.winfo_exists():
-                self.update_restart_at = None
-                return
-            checked_game = now >= self.next_update_apply
-            if checked_game:
-                self.next_update_apply = now + 3
-                try:
-                    if game_is_running():
-                        self.update_restart_at = None
-                        self.status.set("업데이트 준비 완료 · 게임을 종료하면 적용해요.")
-                        return
-                except (OSError, subprocess.SubprocessError):
-                    self.update_restart_at = None
-                    return
-                if self.update_restart_at is None:
-                    self.update_restart_at = now + 30
-            if self.update_restart_at is None:
-                return
-            if not checked_game or now < self.update_restart_at:
-                remaining = max(1, int(self.update_restart_at - now) + 1)
-                self.status.set(f"업데이트 준비 완료 · {remaining}초 후 재시작")
-                return
-        self.pending_update = None
+
         self.update_button.state(["!disabled"])
+        if error:
+            self.show_update_button()
+            self.auto_update_notice = "업데이트 다운로드 실패 · 업데이트 버튼에서 다시 시도할 수 있어요."
+            if not automatic:
+                messagebox.showerror("업데이트 실패", error, parent=self.root)
+            return
+        self.pending_update = staged
+        self.update_button.configure(
+            text="재시작 후 설치", command=self.install_pending_update,
+        )
+
+    def install_pending_update(self):
+        staged = self.pending_update
+        if staged is None:
+            return
+
+        try:
+            if self.command is not None or self.connected or game_is_running():
+                self.auto_update_notice = "게임을 종료한 뒤 재시작 후 설치 버튼을 눌러 주세요."
+                return
+        except (OSError, subprocess.SubprocessError):
+            self.auto_update_notice = "게임 실행 상태를 확인할 수 없어요. 잠시 후 다시 시도해 주세요."
+            return
+
+        self.update_button.state(["disabled"])
         try:
             target = Path(sys.executable)
             if target.stat().st_file_attributes & stat.FILE_ATTRIBUTE_READONLY:
@@ -1138,19 +1161,14 @@ class Controller:
             env = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1")
             subprocess.Popen([str(staged), "--apply-update", str(os.getpid()), sys.executable], env=env)
         except OSError as error:
-            try:
-                staged.unlink(missing_ok=True)
-            except OSError:
-                pass
-            if automatic:
-                self.auto_update_notice = "자동 업데이트 적용 실패 · 업데이트 확인에서 다시 시도할 수 있어요."
-            elif messagebox.askyesno(
-                    "업데이트 실패", f"실행 파일을 교체할 준비를 하지 못했어요.\n{error}\n\n공식 릴리스를 열까요?",
-                    parent=self.root):
-                webbrowser.open(RELEASE_PAGE)
+            self.update_button.state(["!disabled"])
+            messagebox.showerror(
+                "업데이트 실패", f"실행 파일을 교체할 준비를 하지 못했어요.\n{error}", parent=self.root,
+            )
             return
+
+        self.pending_update = None
         self.close()
-        return True
 
     def open_log(self):
         if self.log_window is not None and self.log_window.winfo_exists():
@@ -1344,7 +1362,7 @@ class Controller:
 
     def close(self):
         if self.pending_update is not None:
-            staged, _ = self.pending_update
+            staged = self.pending_update
             try:
                 staged.unlink(missing_ok=True)
             except OSError:
@@ -1428,11 +1446,10 @@ class Controller:
         self.refresh_log()
         self.refresh_log_version()
         self.show_update_result()
-        if self.finish_update_download():
-            return
-        if self.notification_settings["auto_update"] and self.auto_update_notice:
+        self.finish_update_download()
+        if self.auto_update_notice:
             self.status.set(f"{self.status.get()}\n{self.auto_update_notice}")
-        if (getattr(sys, "frozen", False) and self.notification_settings["auto_update"]
+        if (self.current_version is not None and self.pending_update is None
                 and time.monotonic() >= self.next_auto_check and self.update_button.instate(["!disabled"])):
             self.next_auto_check = time.monotonic() + 1800
             self.check_update(automatic=True)

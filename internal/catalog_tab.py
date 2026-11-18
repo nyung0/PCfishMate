@@ -131,8 +131,14 @@ class CatalogTab(ttk.Frame):
         ttk.Checkbutton(filters_row, text="즐겨찾기만", style="Ocean.TCheckbutton",
                         variable=self.favorites_only, command=self.draw).pack(side="left", padx=(0, 12))
         self.combine_colors = tk.BooleanVar(value=False)
-        ttk.Checkbutton(filters_row, text="색상 합쳐 보기", style="Ocean.TCheckbutton",
-                        variable=self.combine_colors, command=self.draw).pack(side="left")
+        self.color_filter = ttk.Checkbutton(
+            filters_row, text="색상 합쳐 보기", style="Ocean.TCheckbutton",
+            variable=self.combine_colors, command=self.draw,
+        )
+        self.color_filter.pack(side="left", padx=(0, 12))
+        self.combine_species = tk.BooleanVar(value=False)
+        ttk.Checkbutton(filters_row, text="종 합쳐보기", style="Ocean.TCheckbutton",
+                        variable=self.combine_species, command=self.select_species_view).pack(side="left")
         search = ttk.Frame(self)
         search.pack(fill="x", pady=(0, 6))
         ttk.Label(search, text="이름 검색", style="Section.TLabel").pack(side="left", padx=(0, 8))
@@ -263,12 +269,19 @@ class CatalogTab(ttk.Frame):
         self.stock = stock if self.stock_available else (set(), {})
         self.draw()
 
+    def select_species_view(self):
+        self.color_filter.state(["disabled"] if self.combine_species.get() else ["!disabled"])
+        self.draw()
+
     def draw(self):
         if self.stock is None:
             return
         discovered, totals = self.stock
         query = "".join(self.query.get().casefold().split())
-        options = self.rarity, tuple(self.sort_order), self.favorites_only.get(), self.combine_colors.get(), query
+        combine_species = self.combine_species.get()
+        combine_colors = self.combine_colors.get()
+        favorites_only = self.favorites_only.get()
+        options = self.rarity, tuple(self.sort_order), favorites_only, combine_colors, combine_species, query
         view = options, self.stock, self.favorites, self.stock_available
         if view == self.view:
             return
@@ -281,20 +294,29 @@ class CatalogTab(ttk.Frame):
             name = self.game.names.get(species, species)
             if query not in "".join(name.casefold().split()):
                 continue
-            key = (name, rarity, stars, "" if options[3] else variant)
+            key = (name, rarity, species, None if combine_species else stars,
+                   "" if combine_species or combine_colors else variant)
             groups.setdefault(key, []).append(variant)
         entries = sorted(groups)
+        star_ranges = {}
+        for entry, variants in groups.items():
+            grades = [self.game.variants[variant][2] for variant in variants]
+            star_ranges[entry] = min(grades), max(grades)
         for choice in reversed(self.sort_order):
             field, descending = divmod(choice, 2)
-            entries.sort(key=lambda entry: entry[field], reverse=bool(descending))
+            if field == 2:
+                entries.sort(key=lambda entry: star_ranges[entry][descending], reverse=bool(descending))
+            else:
+                entries.sort(key=lambda entry: entry[field], reverse=bool(descending))
         cards = []
         favorite_cards = []
         found_count = owned_count = 0
         self.visible_variants = []
-        for name, rarity, stars, group_id in entries:
-            variants = groups[name, rarity, stars, group_id]
+        for entry in entries:
+            name, rarity, _, stars, _ = entry
+            variants = groups[entry]
             favorite = any(variant in self.favorites for variant in variants)
-            if options[2] and not favorite:
+            if favorites_only and not favorite:
                 continue
             found = any(variant in discovered for variant in variants)
             counts = [totals.get(variant, (0, 0, 0)) for variant in variants]
@@ -314,13 +336,13 @@ class CatalogTab(ttk.Frame):
             favorite_cards.append(favorite)
             found_count += found
             owned_count += count
-        item = "등급 조합" if options[3] else "변종"
+        item = "물고기" if combine_species else "등급 조합" if combine_colors else "변종"
         summary = f"발견한 {item} {found_count}/{len(cards)}종 · 현재 보유 {owned_count}마리"
         if not self.stock_available:
             summary = f"{item} {len(cards)}종 · 게임 저장 데이터를 읽을 수 없어요."
         if query and not cards:
             summary = "검색 조건에 맞는 물고기가 없어요."
-        elif options[2] and not cards:
+        elif favorites_only and not cards:
             summary = "표시할 즐겨찾기가 없어요."
         self.summary.set(summary)
         self.grid_view.set_cards(cards, reset, favorites=favorite_cards)
