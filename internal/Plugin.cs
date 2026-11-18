@@ -187,7 +187,7 @@ public sealed class Plugin : BasePlugin
         int[]? BreedStars, bool SameBreedStars, int[]? BreedPriorities);
     private sealed record MergeOptions(bool SameRarity, bool ZeroBreeds, bool ExcludePlaced,
         bool ExcludeSeason, bool ExcludeSeasonMaterials, int[]? Rarities, string[]? SeasonIds,
-        string[]? SeasonMaterials, bool? SameStars);
+        string[]? SeasonMaterials, bool? SameStars, int[]? Stars);
     private Command? command;
 
     private void Record(string kind, string detail, string?[]? parents = null, string? child = null)
@@ -528,6 +528,7 @@ public sealed class Plugin : BasePlugin
             Read(item, "Level") is not int rarity || rarity is < 1 or > 5 ||
             options.Rarities?.Contains(rarity) != true ||
             Read(item, "Grade") is not int stars || stars is < 1 or > 5 ||
+            (options.Stars is not null && !options.Stars.Contains(stars)) ||
             (options.SameStars != false && grade != 0 && stars != grade) ||
             Read(item, "IsLocked") is true ||
             (options.ExcludePlaced && Read(item, "IsPlaced") is true) ||

@@ -766,15 +766,22 @@ class Controller:
         self.status = tk.StringVar(value="게임 플러그인 연결 대기 중")
         status_panel = tk.Frame(panel, bg=PANEL)
         status_panel.pack(fill="x", pady=(0, 10))
-        tk.Label(status_panel, textvariable=self.status, bg=PANEL, fg=TEXT, anchor="w",
-                 font=("Malgun Gothic", 11, "bold"), padx=12, pady=8,
-                 wraplength=560).pack(fill="x")
+        for column in range(2):
+            status_panel.columnconfigure(column, weight=1, uniform="status")
+        status_panel.rowconfigure(0, weight=1)
+        status_label = tk.Label(status_panel, textvariable=self.status, bg=PANEL, fg=TEXT,
+                                anchor="w", justify="left", font=("Malgun Gothic", 10, "bold"),
+                                padx=10, pady=8)
+        status_label.grid(row=0, column=0, sticky="nsew")
+        status_panel.bind("<Configure>", lambda event: status_label.configure(
+            wraplength=max(1, event.width // 2 - 20),
+        ))
         self.heart_row = tk.Frame(status_panel, bg=PANEL)
         self.heart_icons = tk.Frame(self.heart_row, bg=PANEL)
-        self.heart_icons.pack(side="left", padx=(0, 8))
+        self.heart_icons.pack(side="left", padx=(0, 6))
         self.heart_text = tk.StringVar()
         tk.Label(self.heart_row, textvariable=self.heart_text, bg=PANEL, fg=TEXT,
-                 font=("Malgun Gothic", 9)).pack(side="left")
+                 font=("Malgun Gothic", 9), padx=0).pack(side="left")
         self.automation_images = {}
         self.heart_display = None
         try:
@@ -805,6 +812,7 @@ class Controller:
         self.same_merge_stars = tk.BooleanVar(value=True)
         self.merge_filters = [tk.BooleanVar(value=True) for _ in range(4)]
         self.merge_rarities = [tk.BooleanVar(value=True) for _ in range(5)]
+        self.merge_star_flags = [tk.BooleanVar(value=True) for _ in range(5)]
         self.merge_exclusions = None
         for label, flag, sprite in (("교배 자동화", self.breed_enabled, "Icon_BreedHeart"),
                                     ("수조 레벨업 자동화", self.upgrade_enabled, "Icon_LvUp"),
@@ -831,29 +839,21 @@ class Controller:
                     body.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 0))
                 else:
                     body.grid_remove()
-                button.configure(text=f"{title}  {'▾' if active else '▸'}")
+                button.configure(
+                    text=f"{title}  {'▾' if active else '▸'}",
+                    style="Primary.TButton" if active else "TButton",
+                )
 
         for column, (title, body) in enumerate(sections):
             button = ttk.Button(options_row, text=title, command=lambda section=body: show_options(section))
             button.grid(row=0, column=column, sticky="ew", padx=(0, 6) if column == 0 else (6, 0))
             option_buttons.append(button)
         show_options(breed_options)
-        self.build_merge_options(merge_options, divider)
-        ttk.Label(breed_options, text="교배 허용 희귀도 · 두 부모 모두 적용", style="Section.TLabel").pack(anchor="w", pady=(2, 4))
-        grades = ttk.Frame(breed_options)
-        grades.pack(anchor="w")
         self.flags = [tk.BooleanVar(value=True) for _ in RARITIES]
-        style = ttk.Style(root)
-        for index, (grade, flag) in enumerate(zip(RARITIES, self.flags)):
-            rarity_style = f"Rarity{index}.Ocean.TCheckbutton"
-            style.configure(rarity_style, foreground=RARITY_COLORS[index])
-            style.map(rarity_style, foreground=[("active", RARITY_COLORS[index])])
-            ttk.Checkbutton(grades, text=grade, variable=flag,
-                            style=rarity_style, command=self.update_modes).pack(side="left", padx=(0, 8))
-        divider(parent=breed_options)
-        ttk.Label(breed_options, text="교배 허용 별 등급 · 두 부모 모두 적용", style="Section.TLabel").pack(anchor="w", pady=(5, 2))
-        stars = ttk.Frame(breed_options)
-        stars.pack(anchor="w")
+        self.build_rarity_checks(
+            self.option_section(breed_options, "교배 허용 희귀도 · 두 부모 모두 적용"), self.flags,
+        )
+        stars = self.option_section(breed_options, "교배 허용 별 등급 · 두 부모 모두 적용")
         try:
             icon = load_grade_icon(game)
         except Exception:
@@ -867,22 +867,14 @@ class Controller:
                 for index in range(count):
                     strip.tk.call(strip, "copy", sprite, "-to", index * (width + 1), 0)
                 self.star_images.append(strip)
-        for count, flag in enumerate(self.breed_star_flags):
-            label = "별 없음" if count == 0 else "★" * count
-            appearance = {"image": self.star_images[count - 1]} if count and self.star_images else {}
-            ttk.Checkbutton(stars, text=label, variable=flag, style="Ocean.TCheckbutton", **appearance,
-                            command=self.update_modes).pack(side="left", padx=(0, 8))
-        divider(parent=breed_options)
-        matching = ttk.Frame(breed_options)
-        matching.pack(anchor="w", pady=(5, 0))
+        self.build_star_checks(stars, self.breed_star_flags)
+        self.build_merge_options(merge_options)
+        matching = self.option_section(breed_options, "부모 조합")
         for label, flag in (("같은 희귀도끼리만 교배", self.same_breed),
                             ("같은 별 등급끼리만 교배", self.same_breed_stars)):
             ttk.Checkbutton(matching, text=label, variable=flag, style="Ocean.TCheckbutton",
-                            command=self.update_modes).pack(side="left", padx=(0, 12))
-        divider(parent=breed_options)
-        priority = ttk.Frame(breed_options)
-        priority.pack(anchor="w", pady=(2, 0))
-        ttk.Label(priority, text="교배 우선순위", style="Section.TLabel").pack(side="left", padx=(0, 8))
+                            command=self.update_modes).pack(side="left", padx=(0, 8))
+        priority = self.option_section(breed_options, "교배 우선순위")
         labels = ("희귀도 높은 순", "희귀도 낮은 순", "별 등급 높은 순", "별 등급 낮은 순",
                   "남은 교배 적은 순", "남은 교배 많은 순")
         self.breed_priorities = [0, 2, 4]
@@ -918,7 +910,14 @@ class Controller:
         ttk.Button(controls, text="중지", command=self.stop, style="Stop.TButton").pack(side="left")
         ttk.Button(controls, text="로그 보기", command=self.open_log).pack(side="left", padx=6)
         divider(major=True)
-        ttk.Label(panel, text="자동화 기록", style="Section.TLabel").pack(anchor="w", pady=(6, 4))
+        history_heading = ttk.Frame(panel)
+        history_heading.pack(fill="x", pady=(6, 4))
+        ttk.Label(history_heading, text="자동화 기록", style="Section.TLabel").pack(side="left")
+        self.results_only = tk.BooleanVar(value=False)
+        ttk.Checkbutton(history_heading, text="교배·합성 결과만 보기", variable=self.results_only,
+                        style="Ocean.TCheckbutton", command=lambda: self.refresh_log(force_history=True)).pack(
+                            side="right",
+                        )
         history_panel = ttk.Frame(panel)
         history_panel.pack(fill="both", expand=True)
         self.history = ttk.Treeview(history_panel, columns=("time", "kind", "detail"), show="headings")
@@ -1001,23 +1000,43 @@ class Controller:
         self.notification_settings = settings
         return True
 
-    def build_merge_options(self, panel, divider):
-        for heading, labels, flags, columns in (
-            ("자동 등록 조건", ("남은 교배 0회만", "수조 배치 제외",
-                              "시즌 물고기 제외", "시즌 재료 제외"), self.merge_filters, 4),
-            ("종 희귀도 조건", RARITIES[1:], self.merge_rarities, 5),
-            ("재료 조합", ("같은 별 등급 10마리만 합성", "같은 희귀도 10마리만 합성"),
-             (self.same_merge_stars, self.same_merge), 2),
-        ):
-            if panel.winfo_children():
-                divider(parent=panel)
-            ttk.Label(panel, text=heading, style="Section.TLabel").pack(anchor="w", pady=(4, 1))
-            group = ttk.Frame(panel)
-            group.pack(fill="x")
-            for index, (label, flag) in enumerate(zip(labels, flags)):
-                ttk.Checkbutton(group, text=label, variable=flag, style="Ocean.TCheckbutton",
-                                command=self.update_modes).grid(
-                    row=index // columns, column=index % columns, sticky="w", padx=(0, 6))
+    def build_rarity_checks(self, row, flags, first=0):
+        style = ttk.Style(self.root)
+        for index, flag in enumerate(flags, first):
+            rarity_style = f"Rarity{index}.Ocean.TCheckbutton"
+            style.configure(rarity_style, foreground=RARITY_COLORS[index])
+            style.map(rarity_style, foreground=[("active", RARITY_COLORS[index])])
+            ttk.Checkbutton(row, text=RARITIES[index], variable=flag, style=rarity_style,
+                            command=self.update_modes).pack(side="left", padx=(0, 8))
+
+    def build_star_checks(self, row, flags, first=0):
+        for count, flag in enumerate(flags, first):
+            label = "별 없음" if count == 0 else "★" * count
+            appearance = {"image": self.star_images[count - 1]} if count and self.star_images else {}
+            ttk.Checkbutton(row, text=label, variable=flag, style="Ocean.TCheckbutton", **appearance,
+                            command=self.update_modes).pack(side="left", padx=(0, 8))
+
+    def option_section(self, panel, heading):
+        if panel.winfo_children():
+            tk.Frame(panel, bg=PANEL, height=1).pack(fill="x", pady=(6, 5))
+        ttk.Label(panel, text=heading, style="Section.TLabel").pack(anchor="w", pady=(0, 3))
+        row = ttk.Frame(panel)
+        row.pack(anchor="w")
+        return row
+
+    def build_merge_options(self, panel):
+        conditions = self.option_section(panel, "자동 등록 조건")
+        for label, flag in zip(("남은 교배 0회만", "수조 배치 제외", "시즌 물고기 제외", "시즌 재료 제외"),
+                               self.merge_filters):
+            ttk.Checkbutton(conditions, text=label, variable=flag, style="Ocean.TCheckbutton",
+                            command=self.update_modes).pack(side="left", padx=(0, 8))
+        self.build_rarity_checks(self.option_section(panel, "종 희귀도 조건"), self.merge_rarities, first=1)
+        self.build_star_checks(self.option_section(panel, "별 등급 조건"), self.merge_star_flags, first=1)
+        matching = self.option_section(panel, "재료 조합")
+        for label, flag in (("같은 별 등급 10마리만 합성", self.same_merge_stars),
+                            ("같은 희귀도 10마리만 합성", self.same_merge)):
+            ttk.Checkbutton(matching, text=label, variable=flag, style="Ocean.TCheckbutton",
+                            command=self.update_modes).pack(side="left", padx=(0, 8))
 
     def mode_settings(self):
         zero, placed, season, materials = (flag.get() for flag in self.merge_filters)
@@ -1036,6 +1055,7 @@ class Controller:
                       "ZeroBreeds": zero,
                       "ExcludePlaced": placed, "ExcludeSeason": season, "ExcludeSeasonMaterials": materials,
                       "Rarities": [i for i, flag in enumerate(self.merge_rarities, 1) if flag.get()],
+                      "Stars": [i for i, flag in enumerate(self.merge_star_flags, 1) if flag.get()],
                       "SeasonIds": season_ids, "SeasonMaterials": material_ids},
         }
 
@@ -1242,7 +1262,7 @@ class Controller:
             return f"{name} · {RARITIES[rarity]}{grade}"
         return variant
 
-    def refresh_log(self):
+    def refresh_log(self, force_history=False):
         game = Path(self.game_path.get())
         path = game / "BepInEx" / "LogOutput.log"
         try:
@@ -1265,7 +1285,7 @@ class Controller:
                 records = tuple(stream.read().decode("utf-8", errors="replace").splitlines()[-250:])
         except OSError:
             return
-        if records == self.last_history and game == self.catalog_path:
+        if not force_history and records == self.last_history and game == self.catalog_path:
             return
         new_records = Counter(records) - Counter(self.last_history)
         self.last_history = records
@@ -1278,6 +1298,7 @@ class Controller:
                 pass
         self.history.delete(*self.history.get_children())
         notifications = []
+        results_only = self.results_only.get()
         for line in reversed(records):
             try:
                 event = json.loads(line)
@@ -1292,9 +1313,13 @@ class Controller:
                     species, _, stars = self.catalog.variants[child]
                     notifications.append((child, self.catalog.names.get(species, species), stars))
                     new_records[line] -= 1
-                if kind == "교배 요청":
+                if results_only:
+                    if kind not in ("교배 완료", "합성 완료"):
+                        continue
+                    detail = self.fish_label(child)
+                elif kind == "교배 요청":
                     continue
-                if kind == "교배 완료":
+                elif kind == "교배 완료":
                     first, second = map(self.fish_label, event["Parents"])
                     detail = f"{first} + {second} → {self.fish_label(event['Child'])}"
                 elif kind == "합성 완료" and "Child" in event:
@@ -1391,15 +1416,15 @@ class Controller:
         count = state.get("HeartCount")
         maximum = state.get("HeartMax")
         if type(count) is not int or count < 0:
-            self.heart_row.pack_forget()
+            self.heart_row.grid_remove()
             return
         known_max = type(maximum) is int and maximum > 0
         display = (count, maximum if known_max else None)
         if display != self.heart_display:
             for icon in self.heart_icons.winfo_children():
                 icon.destroy()
-            if known_max and maximum <= 10:
-                for index in range(maximum):
+            if known_max:
+                for index in range(maximum if maximum <= 5 else 1):
                     filled = index < count
                     image = self.heart_images.get(filled)
                     tk.Label(self.heart_icons, bg=PANEL, fg=TEXT, image=image or "",
@@ -1412,9 +1437,9 @@ class Controller:
         elif type(next_at) is int and next_at > 0:
             seconds = max(0, next_at - int(time.time()))
             minutes, seconds = divmod(seconds, 60)
-            label += f" · 다음 하트까지 {minutes}분 {seconds:02d}초"
+            label += f" · 다음 {minutes}분 {seconds:02d}초"
         self.heart_text.set(label)
-        self.heart_row.pack(anchor="w", padx=12, pady=(0, 7))
+        self.heart_row.grid(row=0, column=1, padx=8, pady=8)
 
     def tick_status(self):
         self.connected = False
