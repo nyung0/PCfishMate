@@ -321,18 +321,38 @@ def install_module(game, report=lambda step: None):
                           encoding="utf-8")
 
 
-def ready_game(game):
+def module_digest(path):
+    with path.open("rb") as stream:
+        return file_digest(stream, "sha256").hexdigest()
+
+
+def ready_game(game, expected_module=None):
     try:
         if not all((game / name).exists() for name in (*LOADER_FILES, "PCFish.exe", "GameAssembly.dll")):
             return False
-        with installer_asset("PCFishInternal.dll").open("rb") as source, (
-                game / "BepInEx/plugins/PCFishInternal.dll").open("rb") as installed:
-            if file_digest(source, "sha256").digest() != file_digest(installed, "sha256").digest():
-                return False
+        if expected_module is None:
+            expected_module = module_digest(installer_asset("PCFishInternal.dll"))
+        if module_digest(game / "BepInEx/plugins/PCFishInternal.dll") != expected_module:
+            return False
         archive = unity_cache_archive(game)
         return archive is None or valid_unity_archive(archive)
     except (OSError, ValueError):
         return False
+
+
+def update_module_digest(executable):
+    try:
+        with tempfile.TemporaryDirectory(prefix="PCfishMate-module-") as directory:
+            report = Path(directory) / "module.sha256"
+            env = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1")
+            subprocess.run([str(executable), "--check-update-module", str(report)],
+                           env=env, timeout=30, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            digest = report.read_text(encoding="ascii").strip()
+            if re.fullmatch(r"[0-9a-f]{64}", digest):
+                return digest
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return None
 
 
 def season_merge_exclusions(game):
@@ -435,7 +455,7 @@ def setup_game(root):
         ("Steam 이용 약관", "PCfishMate는 비공식 도구입니다. Steam 약관 제4조는 진행이나 보상을 얻는 자동화를 금지하며, 위반 시 계정이나 구독이 제한될 수 있습니다. 설치 동의는 게임 폴더 변경에 적용됩니다."),
         ("게임 폴더 변경", "선택한 게임 폴더에 BepInEx와 모듈을 설치하거나 갱신합니다. 필요한 경우 로더 설정과 Unity 캐시를 변경하고 라이브러리를 다운로드합니다."),
         ("자동화와 데이터", "교배·수조 레벨업·합성을 자동으로 실행할 수 있고, 합성은 재료 물고기를 소비합니다. 도감은 게임 파일과 저장 데이터를 읽으며, 즐겨찾기·설정·기록은 이 PC에 보관합니다."),
-        ("알림과 업데이트", "Windows 알림을 켜면 시작 메뉴 바로가기와 알림 발신자가 등록될 수 있습니다. 앱은 GitHub에서 업데이트를 확인합니다. 자동 다운로드가 켜져 있으면 새 버전을 미리 받고, 재시작 후 설치 버튼을 누르면 적용합니다."),
+        ("알림과 업데이트", "Windows 알림을 켜면 시작 메뉴 바로가기와 알림 발신자가 등록될 수 있습니다. 앱은 GitHub에서 업데이트를 확인합니다. 새 버전은 버전 옆의 업데이트 버튼으로 설치합니다. 게임 모듈 갱신이 필요하면 게임을 종료해야 합니다."),
     )
     ttk.Label(terms, wraplength=510, justify="left",
               text="선택한 PC FISH 폴더에 게임 모듈을 설치하거나 갱신해요. "
@@ -643,6 +663,7 @@ class Controller:
         self.update_result = Queue()
         self.download_result = Queue()
         self.pending_update = None
+        self.pending_module_digest = None
         self.next_auto_check = time.monotonic() + 5
         self.auto_update_notice = ""
         self.available_update = None
@@ -653,7 +674,6 @@ class Controller:
         self.run_id = uuid4().hex
         self.notification_settings_path = BRIDGE / "notification-settings.json"
         self.notification_settings = DEFAULT_NOTIFICATION_SETTINGS.copy()
-        self.notification_settings["auto_update"] = True
         try:
             saved = json.loads(self.notification_settings_path.read_text(encoding="utf-8"))
             if isinstance(saved, dict):
@@ -950,13 +970,6 @@ class Controller:
 
         ttk.Button(panel, text="Windows 알림 설정 열기",
                    command=open_windows_notifications).pack(anchor="w")
-        ttk.Separator(panel).pack(fill="x", pady=10)
-        draft["auto_update"] = tk.BooleanVar(window, value=self.notification_settings["auto_update"])
-        ttk.Checkbutton(panel, text="업데이트 자동 다운로드", style="Ocean.TCheckbutton",
-                        variable=draft["auto_update"]).pack(anchor="w")
-        ttk.Label(panel, wraplength=355, justify="left",
-                  text="새 버전을 미리 받아요. 설치하려면 게임을 종료하고 재시작 후 설치 버튼을 눌러 주세요.").pack(
-                      anchor="w", pady=(4, 0))
         buttons = ttk.Frame(panel)
         buttons.pack(anchor="e", pady=(14, 0))
 
@@ -985,8 +998,6 @@ class Controller:
                 pass
         if self.notification_settings["taskbar"] and not settings["taskbar"]:
             flash_taskbar(self.root, enabled=False)
-        if settings["auto_update"] and not self.notification_settings["auto_update"]:
-            self.next_auto_check = time.monotonic()
         self.notification_settings = settings
         return True
 
@@ -1075,16 +1086,14 @@ class Controller:
                 messagebox.showinfo("업데이트 확인", f"최신 버전입니다.\n\n현재 버전 {current}",
                                     parent=self.root)
             return
-        if automatic and (not getattr(sys, "frozen", False) or not self.notification_settings["auto_update"]):
+        if automatic:
             return
         if getattr(sys, "frozen", False) and verified_update_asset(latest, asset):
-            self.download_update(latest, asset, automatic=automatic)
-        elif automatic:
-            self.auto_update_notice = "업데이트 파일을 검증할 수 없어요. 업데이트 버튼에서 공식 릴리스를 열 수 있어요."
+            self.download_update(latest, asset)
         else:
             webbrowser.open(RELEASE_PAGE)
 
-    def download_update(self, tag, asset, automatic=False):
+    def download_update(self, tag, asset):
         self.update_button.state(["disabled"])
         self.show_update_button("받는 중…")
 
@@ -1109,47 +1118,47 @@ class Controller:
                 with staged.open("rb") as stream:
                     if file_digest(stream, "sha256").hexdigest() != digest[7:]:
                         raise ValueError("업데이트 파일 검증에 실패했습니다.")
-                self.download_result.put((staged, None, automatic))
+                self.download_result.put((staged, update_module_digest(staged), None))
             except (OSError, ValueError, HTTPException) as error:
                 if staged:
                     try:
                         staged.unlink(missing_ok=True)
                     except OSError:
                         pass
-                self.download_result.put((None, str(error), automatic))
+                self.download_result.put((None, None, str(error)))
 
         Thread(target=fetch, daemon=True).start()
 
     def finish_update_download(self):
         try:
-            staged, error, automatic = self.download_result.get_nowait()
+            staged, digest, error = self.download_result.get_nowait()
         except Empty:
             return
 
-        self.update_button.state(["!disabled"])
         if error:
+            self.update_button.state(["!disabled"])
             self.show_update_button()
             self.auto_update_notice = "업데이트 다운로드 실패 · 업데이트 버튼에서 다시 시도할 수 있어요."
-            if not automatic:
-                messagebox.showerror("업데이트 실패", error, parent=self.root)
+            messagebox.showerror("업데이트 실패", error, parent=self.root)
             return
         self.pending_update = staged
-        self.update_button.configure(
-            text="재시작 후 설치", command=self.install_pending_update,
-        )
+        self.pending_module_digest = digest
+        self.show_update_button("설치 대기 중…")
 
     def install_pending_update(self):
         staged = self.pending_update
         if staged is None:
             return
 
-        try:
-            if self.command is not None or self.connected or game_is_running():
-                self.auto_update_notice = "게임을 종료한 뒤 재시작 후 설치 버튼을 눌러 주세요."
+        if self.pending_module_digest is None or not ready_game(Path(self.game_path.get()), self.pending_module_digest):
+            try:
+                if self.command is not None or self.connected or game_is_running():
+                    self.show_update_button("게임 종료 필요")
+                    self.auto_update_notice = "게임 모듈 갱신을 위해 PC FISH를 종료해 주세요."
+                    return
+            except (OSError, subprocess.SubprocessError):
+                self.auto_update_notice = "게임 실행 상태를 확인하는 중이에요."
                 return
-        except (OSError, subprocess.SubprocessError):
-            self.auto_update_notice = "게임 실행 상태를 확인할 수 없어요. 잠시 후 다시 시도해 주세요."
-            return
 
         self.update_button.state(["disabled"])
         try:
@@ -1161,6 +1170,8 @@ class Controller:
             env = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1")
             subprocess.Popen([str(staged), "--apply-update", str(os.getpid()), sys.executable], env=env)
         except OSError as error:
+            self.auto_update_notice = ""
+            self.update_button.configure(text="설치 다시 시도", command=self.retry_pending_update)
             self.update_button.state(["!disabled"])
             messagebox.showerror(
                 "업데이트 실패", f"실행 파일을 교체할 준비를 하지 못했어요.\n{error}", parent=self.root,
@@ -1169,6 +1180,11 @@ class Controller:
 
         self.pending_update = None
         self.close()
+        return True
+
+    def retry_pending_update(self):
+        self.update_button.state(["disabled"])
+        self.show_update_button("설치 대기 중…")
 
     def open_log(self):
         if self.log_window is not None and self.log_window.winfo_exists():
@@ -1447,6 +1463,9 @@ class Controller:
         self.refresh_log_version()
         self.show_update_result()
         self.finish_update_download()
+        if self.pending_update is not None and self.update_button.instate(["disabled"]):
+            if self.install_pending_update():
+                return
         if self.auto_update_notice:
             self.status.set(f"{self.status.get()}\n{self.auto_update_notice}")
         if (self.current_version is not None and self.pending_update is None
@@ -1505,6 +1524,12 @@ def apply_update(parent_pid, target):
 
 
 if __name__ == "__main__":
+    if getattr(sys, "frozen", False) and len(sys.argv) == 3 and sys.argv[1] == "--check-update-module":
+        try:
+            Path(sys.argv[2]).write_text(module_digest(installer_asset("PCFishInternal.dll")), encoding="ascii")
+        except OSError:
+            raise SystemExit(1)
+        raise SystemExit(0)
     if sys.argv[1:] == ["--check-image-runtime"]:
         from UnityPy.export import SpriteHelper
         raise SystemExit(0 if callable(SpriteHelper.get_image_from_sprite) else 1)

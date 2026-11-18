@@ -8,11 +8,11 @@ try {
     $expected = '5B63D7D0E92A2448CCD13B738FF95FF1CC1026C6D718555D4DF8E6C824953AC4'
     if ((Get-FileHash build/loader.zip -Algorithm SHA256).Hash -ne $expected) { throw 'Unexpected BepInEx archive hash' }
     Expand-Archive build/loader.zip build/loader -Force
-    
+
     Invoke-WebRequest 'https://unity.bepinex.dev/libraries/6000.0.76.zip' -OutFile build/6000.0.76.zip
     $expected = '2BA752C2CA15CDBF780B123A3F335B745F1DE14A15C3967211E1E58BED0FCFA5'
     if ((Get-FileHash build/6000.0.76.zip -Algorithm SHA256).Hash -ne $expected) { throw 'Unexpected Unity library archive hash' }
-    
+
     $core = (Resolve-Path build/loader/BepInEx/core).Path
     dotnet build internal/PCFishInternal.csproj -c Release "-p:BepInExCore=$core" -o build/plugin
     if ($LASTEXITCODE) { exit $LASTEXITCODE }
@@ -35,6 +35,12 @@ try {
     $exe = (Resolve-Path dist/PCfishMate.exe).Path
     $check = Start-Process -FilePath $exe -ArgumentList '--check-image-runtime' -WindowStyle Hidden -Wait -PassThru
     if ($check.ExitCode -ne 0) { throw "Packaged image runtime check failed ($($check.ExitCode))" }
+    $report = (Join-Path (Resolve-Path build).Path 'module-check.sha256')
+    $check = Start-Process -FilePath $exe -ArgumentList '--check-update-module', ('"{0}"' -f $report) -WindowStyle Hidden -Wait -PassThru
+    $expectedModule = (Get-FileHash build/plugin/PCFishInternal.dll -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($check.ExitCode -ne 0 -or !(Test-Path -LiteralPath $report) -or (Get-Content -LiteralPath $report -Raw) -cne $expectedModule) {
+        throw "Packaged module digest check failed ($($check.ExitCode))"
+    }
     $hash = (Get-FileHash dist/PCfishMate.exe -Algorithm SHA256).Hash.ToLowerInvariant()
     "$hash  PCfishMate.exe" | Set-Content dist/SHA256SUMS.txt -Encoding ascii
 }

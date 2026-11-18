@@ -20,6 +20,17 @@ SORT_LABELS = ("가나다순", "가나다 역순", "희귀도 낮은 순", "희�
                "별 등급 낮은 순", "별 등급 높은 순")
 
 
+def catalog_capacity(status_path, install):
+    try:
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        capacity = status["FishCapacity"]
+        if type(capacity) is int and capacity > 0 and Path(status["GameRoot"]).resolve() == install.resolve():
+            return capacity
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+        pass
+    return None
+
+
 def catalog_stock(state):
     discovered = {variant for variants in state.get("fishCollection", {}).values()
                   for variant in variants}
@@ -239,7 +250,10 @@ class CatalogTab(ttk.Frame):
                     logging.exception("Could not read catalog artwork")
                     art = {}
             try:
-                stock = catalog_stock(game.state())
+                state = game.state()
+                discovered, totals = catalog_stock(state)
+                capacity = catalog_capacity(self.favorites_path.with_name("status.json"), install)
+                stock = discovered, totals, len(state["fishList"]), capacity
             except (OSError, ValueError, KeyError, TypeError):
                 stock = None
             self.result.put((install, game, art, stock, None))
@@ -266,7 +280,7 @@ class CatalogTab(ttk.Frame):
             self.images = {key: tk.PhotoImage(master=self, data=png) for key, png in art.items()}
             self.view = None
         self.stock_available = stock is not None
-        self.stock = stock if self.stock_available else (set(), {})
+        self.stock = stock if self.stock_available else (set(), {}, 0, None)
         self.draw()
 
     def select_species_view(self):
@@ -276,7 +290,7 @@ class CatalogTab(ttk.Frame):
     def draw(self):
         if self.stock is None:
             return
-        discovered, totals = self.stock
+        discovered, totals, owned_count, capacity = self.stock
         query = "".join(self.query.get().casefold().split())
         combine_species = self.combine_species.get()
         combine_colors = self.combine_colors.get()
@@ -310,7 +324,7 @@ class CatalogTab(ttk.Frame):
                 entries.sort(key=lambda entry: entry[field], reverse=bool(descending))
         cards = []
         favorite_cards = []
-        found_count = owned_count = 0
+        found_count = 0
         self.visible_variants = []
         for entry in entries:
             name, rarity, _, stars, _ = entry
@@ -335,14 +349,16 @@ class CatalogTab(ttk.Frame):
             self.visible_variants.append(tuple(variants))
             favorite_cards.append(favorite)
             found_count += found
-            owned_count += count
         item = "물고기" if combine_species else "등급 조합" if combine_colors else "변종"
-        summary = f"발견한 {item} {found_count}/{len(cards)}종 · 현재 보유 {owned_count}마리"
+        summary = f"발견한 {item} {found_count}/{len(cards)}종"
         if not self.stock_available:
             summary = f"{item} {len(cards)}종 · 게임 저장 데이터를 읽을 수 없어요."
         if query and not cards:
             summary = "검색 조건에 맞는 물고기가 없어요."
         elif favorites_only and not cards:
             summary = "표시할 즐겨찾기가 없어요."
+        if self.stock_available:
+            limit = f"{capacity:,}" if capacity is not None else "—"
+            summary += f" · 현재 보유 {owned_count:,} / {limit}마리"
         self.summary.set(summary)
         self.grid_view.set_cards(cards, reset, favorites=favorite_cards)

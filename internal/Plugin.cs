@@ -48,6 +48,7 @@ public sealed class Plugin : BasePlugin
     private bool bridgeReadFailed;
     private bool mergeSlotsOwned, breedSlotsOwned;
     private (int Max, long Interval)? heartConfig;
+    private int? fishCapacity;
 
     [DllImport("user32.dll")]
     private static extern short GetAsyncKeyState(int key);
@@ -245,6 +246,8 @@ public sealed class Plugin : BasePlugin
                       || (command?.TankUpgrade == true && upgradeHookReady && !upgradeFailed)
                     : enabled.Value && !breedFailed,
                 Message = message,
+                FishCapacity = ReadFishCapacity(),
+                GameRoot = Paths.GameRootPath,
                 HeartCount = hearts.Count,
                 HeartMax = hearts.Max,
                 NextHeartAt = hearts.NextAt,
@@ -819,12 +822,8 @@ public sealed class Plugin : BasePlugin
         {
             if (heartConfig is null)
             {
-                var type = data.GetType().Assembly.GetType("NN.PF.Core.GameConfig", throwOnError: true)!;
-                const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static;
-                object? ConfigValue(string name) =>
-                    type.GetProperty(name, flags)?.GetValue(null) ?? type.GetField(name, flags)?.GetValue(null);
-                var maximum = Convert.ToInt32(ConfigValue("CF_BREED_MAX_COUNT"), CultureInfo.InvariantCulture);
-                var seconds = Convert.ToInt64(ConfigValue("CF_BREED_COUNT_INTERVAL"), CultureInfo.InvariantCulture);
+                var maximum = Convert.ToInt32(ReadGameConfig("CF_BREED_MAX_COUNT"), CultureInfo.InvariantCulture);
+                var seconds = Convert.ToInt64(ReadGameConfig("CF_BREED_COUNT_INTERVAL"), CultureInfo.InvariantCulture);
                 if (maximum <= 0 || seconds <= 0)
                     return (count, null, null);
                 heartConfig = (maximum, seconds);
@@ -841,6 +840,31 @@ public sealed class Plugin : BasePlugin
         {
             return (count, heartConfig?.Max, null);
         }
+    }
+
+    private object? ReadGameConfig(string name)
+    {
+        var type = data?.GetType().Assembly.GetType("NN.PF.Core.GameConfig");
+        const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static;
+        return type?.GetProperty(name, flags)?.GetValue(null) ?? type?.GetField(name, flags)?.GetValue(null);
+    }
+
+    private int? ReadFishCapacity()
+    {
+        if (fishCapacity is not null || data is null)
+            return fishCapacity;
+
+        try
+        {
+            var maximum = Convert.ToInt32(ReadGameConfig("CF_FISH_MAX_COUNT"), CultureInfo.InvariantCulture);
+            if (maximum > 0)
+                fishCapacity = maximum;
+        }
+        catch (Exception)
+        {
+            // Older game versions may not expose this setting.
+        }
+        return fishCapacity;
     }
 
     private static bool Active(object behaviour) =>
