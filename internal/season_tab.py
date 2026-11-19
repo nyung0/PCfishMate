@@ -282,6 +282,7 @@ class SeasonTab(ttk.Frame):
             self.view = None
 
     def select_recipe(self, name, stars):
+        self.focus_set()
         self.selected_recipe = next(
             (key for key in self.recipes if key[1:] == (name, stars)), self.selected_recipe,
         )
@@ -315,7 +316,7 @@ class SeasonTab(ttk.Frame):
             button = tk.Button(
                 frame, image=image or "", text=name, compound="top", bg=PANEL if selected else OCEAN,
                 activebackground=WATER, fg=TEXT, activeforeground=TEXT, relief="flat",
-                borderwidth=0, highlightthickness=1, highlightbackground=ACCENT if selected else OCEAN,
+                borderwidth=0, highlightthickness=0, takefocus=False, default="disabled",
                 font=("Malgun Gothic", 9, "bold"), padx=6, pady=1, cursor="hand2",
                 command=lambda target=name, stars=grade: self.select_recipe(target, stars),
             )
@@ -363,7 +364,6 @@ class SeasonTab(ttk.Frame):
             grade = selected_grade if selected_grade in grades else grades[0]
             button.configure(
                 bg=PANEL if selected else OCEAN,
-                highlightbackground=ACCENT if selected else OCEAN,
                 command=lambda target=name, stars=grade: self.select_recipe(target, stars),
             )
         grades = {grade for _, name, grade in self.recipes if name == selected_name}

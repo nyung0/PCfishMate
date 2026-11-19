@@ -824,11 +824,6 @@ class Controller:
         except (OSError, ValueError):
             current_version = None
         self.current_version = current_version
-        tk.Label(title_text, text=current_version or "버전 확인 불가", bg=WATER, fg="#B5C8E3",
-                 font=version_font, borderwidth=0, padx=0, pady=0).grid(
-                     row=0, column=1, sticky="s", padx=(8, 0),
-                     pady=(0, max(0, title_descent - version_descent)),
-                 )
         ttk.Button(title_bar, text="게임 실행",
                    command=lambda: os.startfile("steam://rungameid/4842670")).pack(side="right", padx=16)
         style = ttk.Style(root)
@@ -840,21 +835,11 @@ class Controller:
         self.settings_button = ttk.Button(title_bar, text="⚙", style="Settings.TButton",
                                           cursor="hand2", command=self.open_settings)
         self.settings_button.pack(side="right", padx=(0, 8))
-        update_normal = rounded_image(root, 12, 12, 3, WATER, "#8CE1A8")
-        update_hover = rounded_image(root, 12, 12, 3, PANEL, TEXT)
-        root.button_images.extend((update_normal, update_hover))
-        style.element_create("UpdateOutline.button", "image", update_normal,
-                             ("active", update_hover), ("focus", update_hover), border=4, padding=1, sticky="nsew")
-        style.layout("UpdateLink.TButton", [("UpdateOutline.button", {"sticky": "nsew", "children": [
-            ("Button.padding", {"sticky": "nsew", "children": [("Button.label", {"sticky": "nsew"})]}),
-        ]})])
-        style.configure("UpdateLink.TButton", font=version_font, foreground="#8CE1A8", padding=(4, 0))
-        style.map("UpdateLink.TButton", foreground=[
-            ("disabled", "#B5C8E3"), ("focus", TEXT), ("active", TEXT),
-        ])
-        self.update_label_bottom = max(0, title_descent - version_descent)
-        self.update_button = ttk.Button(title_text, text="업데이트", style="UpdateLink.TButton",
-                                        cursor="hand2", command=self.check_update)
+        self.update_button = None
+        self.update_busy = False
+        self.update_action = self.check_update
+        self.update_caption = "업데이트"
+        self.update_status = tk.StringVar(value="설정을 열면 업데이트를 확인합니다.")
         self.game_path = tk.StringVar(value=str(game))
         tabs = ttk.Notebook(root)
         tabs.pack(fill="both", expand=True, padx=12, pady=12)
@@ -1050,9 +1035,10 @@ class Controller:
     def open_settings(self):
         if self.settings_window is not None and self.settings_window.winfo_exists():
             self.settings_window.lift()
+            self.check_update(automatic=True)
             return
         window = self.settings_window = tk.Toplevel(self.root)
-        window.title(f"{APP_NAME} · 알림 설정")
+        window.title(f"{APP_NAME} · 설정")
         window.configure(bg=OCEAN)
         window.transient(self.root)
         window.resizable(False, False)
@@ -1060,9 +1046,16 @@ class Controller:
         panel.pack(fill="both", expand=True)
         ttk.Label(panel, text="즐겨찾기 물고기 알림", font=("Malgun Gothic", 11, "bold")).pack(anchor="w")
         draft = {}
+
+        def save():
+            settings = {key: value.get() for key, value in draft.items()}
+            if not self.save_notification_settings(settings, window):
+                for key, value in draft.items():
+                    value.set(self.notification_settings[key])
+
         for key, label in (("windows", "Windows 팝업 알림"), ("taskbar", "작업표시줄 아이콘 깜박임")):
             draft[key] = tk.BooleanVar(window, value=self.notification_settings[key])
-            ttk.Checkbutton(panel, text=label, variable=draft[key], style="Ocean.TCheckbutton").pack(
+            ttk.Checkbutton(panel, text=label, variable=draft[key], style="Ocean.TCheckbutton", command=save).pack(
                 anchor="w", pady=(8, 0))
         ttk.Label(
             panel, wraplength=355, justify="left",
@@ -1080,16 +1073,23 @@ class Controller:
 
         ttk.Button(panel, text="Windows 알림 설정 열기",
                    command=open_windows_notifications).pack(anchor="w")
-        buttons = ttk.Frame(panel)
-        buttons.pack(anchor="e", pady=(14, 0))
+        ttk.Separator(panel).pack(fill="x", pady=(18, 12))
+        update_card = tk.Frame(panel, bg=PANEL, highlightthickness=1, highlightbackground=WATER)
+        update_card.pack(fill="x")
+        update_row = tk.Frame(update_card, bg=PANEL)
+        update_row.pack(fill="x", padx=10, pady=10)
+        tk.Label(update_row, text=self.current_version or "버전 확인 불가", bg=WATER, fg=TEXT,
+                 font=("Malgun Gothic", 9, "bold"), padx=6, pady=2).pack(side="left")
+        ttk.Style(window).configure("SettingsUpdate.Primary.TButton", font=("Malgun Gothic", 9),
+                                     padding=(6, 1))
+        self.update_button = ttk.Button(update_row, text=self.update_caption, command=self.update_action,
+                                        style="SettingsUpdate.Primary.TButton")
+        status_label = tk.Label(update_row, textvariable=self.update_status, bg=PANEL, fg="#B5C8E3",
+                                font=("Malgun Gothic", 9), anchor="w")
+        status_label.pack(side="left", fill="x", expand=True, padx=(10, 8))
+        self.show_update_button()
+        self.check_update(automatic=True)
 
-        def save():
-            settings = {key: value.get() for key, value in draft.items()}
-            if self.save_notification_settings(settings, window):
-                window.destroy()
-
-        ttk.Button(buttons, text="취소", command=window.destroy).pack(side="left", padx=(0, 6))
-        ttk.Button(buttons, text="확인", command=save, style="Primary.TButton").pack(side="left")
 
     def save_notification_settings(self, settings, parent):
         path = self.notification_settings_path
@@ -1170,19 +1170,28 @@ class Controller:
                       "SeasonIds": season_ids, "SeasonMaterials": material_ids},
         }
 
+    def set_update_busy(self, busy):
+        self.update_busy = busy
+        self.show_update_button()
+
     def show_update_button(self, label=None):
-        if self.available_update is None:
-            self.update_button.grid_remove()
+        if label is not None:
+            self.update_caption = label
+        button = self.update_button
+        if button is None or not button.winfo_exists():
             return
-        self.update_button.configure(text=label or "업데이트")
-        if not self.update_button.winfo_manager():
-            self.update_button.grid(row=0, column=2, sticky="s", padx=(8, 0),
-                                    pady=(0, self.update_label_bottom))
+        button.configure(text=self.update_caption, command=self.update_action)
+        button.state(["disabled"] if self.update_busy else ["!disabled"])
+        if self.available_update is None:
+            button.pack_forget()
+        elif not button.winfo_manager():
+            button.pack(side="right", before=button.master.winfo_children()[-1])
 
     def check_update(self, automatic=False):
-        if self.update_button.instate(["disabled"]):
+        if self.update_busy:
             return
-        self.update_button.state(["disabled"])
+        self.set_update_busy(True)
+        self.update_status.set("업데이트 확인 중…")
 
         def fetch():
             try:
@@ -1200,8 +1209,9 @@ class Controller:
             current, latest, newer, asset, error, automatic = self.update_result.get_nowait()
         except Empty:
             return
-        self.update_button.state(["!disabled"])
+        self.set_update_busy(False)
         if error:
+            self.update_status.set(f"업데이트 확인 실패 · {error}")
             if automatic:
                 self.next_auto_check = time.monotonic() + 60
             else:
@@ -1211,6 +1221,8 @@ class Controller:
 
         self.auto_update_notice = ""
         self.available_update = latest if newer else None
+        self.update_caption = "업데이트"
+        self.update_status.set(f"새 버전 {latest}이 있어요." if newer else "최신 버전입니다.")
         self.show_update_button()
         if not newer:
             if not automatic:
@@ -1225,8 +1237,9 @@ class Controller:
             webbrowser.open(RELEASE_PAGE)
 
     def download_update(self, tag, asset):
-        self.update_button.state(["disabled"])
+        self.set_update_busy(True)
         self.show_update_button("받는 중…")
+        self.update_status.set("업데이트를 다운로드하고 있습니다.")
 
         def fetch():
             staged = None
@@ -1267,7 +1280,7 @@ class Controller:
             return
 
         if error:
-            self.update_button.state(["!disabled"])
+            self.set_update_busy(False)
             self.show_update_button()
             self.auto_update_notice = "업데이트 다운로드 실패 · 업데이트 버튼에서 다시 시도할 수 있어요."
             messagebox.showerror("업데이트 실패", error, parent=self.root)
@@ -1296,7 +1309,7 @@ class Controller:
                 self.auto_update_notice = "게임 실행 상태를 확인하는 중이에요."
                 return
 
-        self.update_button.state(["disabled"])
+        self.set_update_busy(True)
         try:
             target = Path(sys.executable)
             if target.stat().st_file_attributes & stat.FILE_ATTRIBUTE_READONLY:
@@ -1309,8 +1322,9 @@ class Controller:
             subprocess.Popen([str(staged), "--apply-update", str(os.getpid()), sys.executable], env=env)
         except OSError as error:
             self.auto_update_notice = ""
-            self.update_button.configure(text="설치 다시 시도", command=self.retry_pending_update)
-            self.update_button.state(["!disabled"])
+            self.update_action = self.retry_pending_update
+            self.show_update_button("설치 다시 시도")
+            self.set_update_busy(False)
             messagebox.showerror(
                 "업데이트 실패", f"실행 파일을 교체할 준비를 하지 못했어요.\n{error}", parent=self.root,
             )
@@ -1321,7 +1335,7 @@ class Controller:
         return True
 
     def retry_pending_update(self):
-        self.update_button.state(["disabled"])
+        self.set_update_busy(True)
         self.show_update_button("설치 대기 중…")
 
     def open_log(self):
@@ -1606,15 +1620,11 @@ class Controller:
         self.refresh_log_version()
         self.show_update_result()
         self.finish_update_download()
-        if self.pending_update is not None and self.update_button.instate(["disabled"]):
+        if self.pending_update is not None and self.update_busy:
             if self.install_pending_update():
                 return
         if self.auto_update_notice:
             self.status.set(f"{self.status.get()}\n{self.auto_update_notice}")
-        if (self.current_version is not None and self.pending_update is None
-                and time.monotonic() >= self.next_auto_check and self.update_button.instate(["!disabled"])):
-            self.next_auto_check = time.monotonic() + 1800
-            self.check_update(automatic=True)
         self.root.after(1000, self.tick)
 
 

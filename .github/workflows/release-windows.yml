@@ -43,10 +43,21 @@ jobs:
           - 인게임 별과 좌우 화살표로 1~5성을 선택해 재료를 확인해요. **남은 교배 0회 재료만** 확인할 수도 있어요.
           - 시즌 물고기는 희귀도 낮은 순으로 정렬하고, 시즌과 게임 레시피가 바뀌면 갱신해요.
           - 인게임 테두리를 적용하고, 활성 탭이 본문과 이어지도록 다듬었어요. 선택할 때 불필요하게 다시 그리던 부분을 줄였어요.
+          - 설정을 열면 업데이트를 확인해요. 하단 한 줄에 현재 버전, 상태와 작은 업데이트 버튼을 표시해요.
+          - 알림 설정은 변경 즉시 저장하며, 물고기 선택 후 점선 포커스가 남지 않도록 수정했어요.
           - 기존 설치 동의 기록이 있으면 모듈 업데이트는 설치 마법사 없이 진행해요. 필요한 경우 Windows 관리자 권한 확인이 표시될 수 있어요.
           - 모듈 갱신이 필요하면 실행 중인 게임의 정상 종료를 요청하고, 업데이트 후 게임을 다시 실행해요.
 
           [Steam 이용약관 제4조](https://store.steampowered.com/subscriber_agreement/#4)
           '@
-          gh release create $tag dist/PCfishMate.exe dist/SHA256SUMS.txt --target $env:GITHUB_SHA --title "PCfishMate $tag" --notes "$notes"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag dist/PCfishMate.exe dist/SHA256SUMS.txt --clobber
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+            gh api --method PATCH "repos/$env:GITHUB_REPOSITORY/git/refs/tags/$tag" -f "sha=$env:GITHUB_SHA" -F force=true
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+            gh release edit $tag --title "PCfishMate $tag" --notes "$notes"
+          } else {
+            gh release create $tag dist/PCfishMate.exe dist/SHA256SUMS.txt --target $env:GITHUB_SHA --title "PCfishMate $tag" --notes "$notes"
+          }
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
