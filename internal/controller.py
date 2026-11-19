@@ -1,4 +1,5 @@
 import json
+import csv
 import os
 import ctypes
 import re
@@ -34,7 +35,7 @@ if not getattr(sys, "frozen", False):
 
 from catalog_tab import CatalogTab, catalog_art
 from favorite_notifications import APP_ID, DEFAULT_NOTIFICATION_SETTINGS, flash_taskbar, notify_favorites
-from ocean_ui import OCEAN, PANEL, RARITIES, RARITY_COLORS, TEXT, WATER, ocean_style, rounded_image
+from ocean_ui import OCEAN, PANEL, RARITIES, RARITY_COLORS, TEXT, WATER, ocean_style, rounded_image, game_notebook_frame
 from season_tab import GameData, SeasonTab, load_automation_icons, load_grade_icon, load_install_fish, load_season_art
 
 
@@ -272,6 +273,34 @@ def game_is_running():
     return b"pcfish.exe" in processes.lower()
 
 
+def request_game_close():
+    tasklist = Path(os.environ["SystemRoot"]) / "System32" / "tasklist.exe"
+    output = subprocess.check_output(
+        [str(tasklist), "/FI", "IMAGENAME eq PCFish.exe", "/FO", "CSV", "/NH"],
+        timeout=5, creationflags=subprocess.CREATE_NO_WINDOW,
+    ).decode(errors="replace")
+    pids = {int(row[1]) for row in csv.reader(output.splitlines())
+            if len(row) > 1 and row[0].lower() == "pcfish.exe" and row[1].isdigit()}
+    user = ctypes.windll.user32
+    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    user.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
+    user.PostMessageW.argtypes = (wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+    user.IsWindowVisible.argtypes = (wintypes.HWND,)
+    user.EnumWindows.argtypes = (callback_type, wintypes.LPARAM)
+
+    @callback_type
+    def close_window(window, _):
+        pid = wintypes.DWORD()
+        user.GetWindowThreadProcessId(window, ctypes.byref(pid))
+        if pid.value in pids and user.IsWindowVisible(window):
+            user.PostMessageW(window, 0x0010, 0, 0)
+        return True
+
+    if not user.EnumWindows(close_window, 0):
+        raise ctypes.WinError()
+
+
+
 def install_module(game, report=lambda step: None):
     if not (game / "PCFish.exe").is_file() or not (game / "GameAssembly.dll").is_file():
         raise ValueError("PCFish.exe가 있는 게임 폴더를 선택하세요.")
@@ -377,9 +406,10 @@ class ShellExecuteInfo(ctypes.Structure):
     ]
 
 
-def elevated_install(game, progress_address):
+def elevated_install(game, progress_address=None):
     args = ["--install-module", str(game)]
-    args.extend((str(progress_address[0]), progress_address[1]))
+    if progress_address is not None:
+        args.extend((str(progress_address[0]), progress_address[1]))
     if not getattr(sys, "frozen", False):
         args.insert(0, str(Path(__file__).resolve()))
     info = ShellExecuteInfo(size=ctypes.sizeof(ShellExecuteInfo), mask=0x40,
@@ -403,6 +433,80 @@ def elevated_install(game, progress_address):
     return info.process
 
 
+def update_installed_module(root, game):
+    window = tk.Toplevel(root)
+    window.title(f"{APP_NAME} 업데이트")
+    window.resizable(False, False)
+    window.protocol("WM_DELETE_WINDOW", lambda: None)
+    panel = ttk.Frame(window, padding=24)
+    panel.pack()
+    label = tk.StringVar(value="게임 모듈을 업데이트하는 중…")
+    ttk.Label(panel, textvariable=label, width=48).pack(anchor="w")
+    progress = ttk.Progressbar(panel, mode="determinate", maximum=100, length=360)
+    progress.pack(pady=(12, 0))
+    progress_steps = Queue()
+    results = Queue()
+    finished = tk.BooleanVar(master=root, value=False)
+    succeeded = False
+
+    def install():
+        try:
+            try:
+                install_module(game, progress_steps.put)
+            except PermissionError:
+                handle = elevated_install(game)
+                kernel = ctypes.windll.kernel32
+                kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+                kernel.WaitForSingleObject.restype = wintypes.DWORD
+                kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+                try:
+                    if kernel.WaitForSingleObject(handle, 0xFFFFFFFF) != 0:
+                        raise OSError("모듈 업데이트 프로세스를 확인할 수 없습니다.")
+                finally:
+                    kernel.CloseHandle(handle)
+            if not ready_game(game):
+                raise OSError("모듈 업데이트를 완료하지 못했습니다. 다시 실행해 주세요.")
+            results.put(None)
+        except Exception as error:
+            results.put(str(error))
+
+    def poll():
+        nonlocal succeeded
+        while not progress_steps.empty():
+            progress.configure(value=progress_steps.get_nowait())
+        try:
+            error = results.get_nowait()
+        except Empty:
+            window.after(200, poll)
+            return
+        if error:
+            messagebox.showerror("모듈 업데이트 실패", error, parent=window)
+        else:
+            succeeded = True
+            progress.configure(value=100)
+        window.destroy()
+        finished.set(True)
+
+    def start():
+        try:
+            running = game_is_running()
+        except (OSError, subprocess.SubprocessError):
+            label.set("게임 실행 상태를 확인하는 중…")
+            window.after(1000, start)
+            return
+        if running:
+            label.set("게임 모듈을 갱신하려면 PC FISH를 종료해 주세요.")
+            window.after(1000, start)
+            return
+        label.set("게임 모듈을 업데이트하는 중…")
+        Thread(target=install, daemon=True).start()
+        window.after(200, poll)
+
+    window.after(100, start)
+    root.wait_variable(finished)
+    return succeeded
+
+
 def setup_game(root):
     settings = BRIDGE / "setup.json"
     accepted = False
@@ -412,8 +516,11 @@ def setup_game(root):
         accepted = saved.get("InstallNoticeVersion") == INSTALL_NOTICE_VERSION
     except (OSError, ValueError, KeyError, TypeError):
         previous = None
-    if accepted and previous is not None and ready_game(previous):
-        return previous
+    if accepted and previous is not None:
+        if ready_game(previous):
+            return previous
+        if (previous / "PCFish.exe").is_file() and (previous / "GameAssembly.dll").is_file():
+            return previous if update_installed_module(root, previous) else None
 
     wizard = tk.Toplevel(root)
     wizard.title(f"{APP_NAME} 설치 마법사")
@@ -664,6 +771,8 @@ class Controller:
         self.download_result = Queue()
         self.pending_update = None
         self.pending_module_digest = None
+        self.update_game_close_requested = False
+        self.update_restart_game = False
         self.next_auto_check = time.monotonic() + 5
         self.auto_update_notice = ""
         self.available_update = None
@@ -762,7 +871,7 @@ class Controller:
                 if active == str(tab):
                     tab.after_idle(tab.refresh)
 
-        tabs.bind("<<NotebookTabChanged>>", refresh_tab)
+        tabs.bind("<<NotebookTabChanged>>", refresh_tab, add="+")
         self.status = tk.StringVar(value="게임 플러그인 연결 대기 중")
         status_panel = tk.Frame(panel, bg=PANEL)
         status_panel.pack(fill="x", pady=(0, 10))
@@ -789,6 +898,8 @@ class Controller:
                                       for name, png in load_automation_icons(game).items()}
         except Exception:
             pass  # Use text when the installed game does not expose these sprites.
+        if frame := self.automation_images.get("Frame_AquaWindow"):
+            game_notebook_frame(root, frame, tabs)
         if settings_icon := self.automation_images.get("Icon_Config"):
             self.settings_button.configure(image=settings_icon, text="")
         self.heart_images = {
@@ -1172,9 +1283,14 @@ class Controller:
 
         if self.pending_module_digest is None or not ready_game(Path(self.game_path.get()), self.pending_module_digest):
             try:
-                if self.command is not None or self.connected or game_is_running():
-                    self.show_update_button("게임 종료 필요")
-                    self.auto_update_notice = "게임 모듈 갱신을 위해 PC FISH를 종료해 주세요."
+                if game_is_running():
+                    self.show_update_button("게임 재시작 준비 중")
+                    self.auto_update_notice = "모듈 업데이트를 위해 게임을 종료하는 중 · 완료 후 다시 실행해요."
+                    if not self.update_game_close_requested:
+                        self.stop()
+                        request_game_close()
+                        self.update_game_close_requested = True
+                        self.update_restart_game = True
                     return
             except (OSError, subprocess.SubprocessError):
                 self.auto_update_notice = "게임 실행 상태를 확인하는 중이에요."
@@ -1188,6 +1304,8 @@ class Controller:
             with tempfile.NamedTemporaryFile(dir=target.parent):
                 pass
             env = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1")
+            if self.update_restart_game:
+                env["PCFISHMATE_RESTART_GAME"] = "1"
             subprocess.Popen([str(staged), "--apply-update", str(os.getpid()), sys.executable], env=env)
         except OSError as error:
             self.auto_update_notice = ""
@@ -1611,5 +1729,10 @@ if __name__ == "__main__":
             root.destroy()
         else:
             Controller(root, game)
+            if os.environ.pop("PCFISHMATE_RESTART_GAME", None) == "1":
+                try:
+                    os.startfile("steam://rungameid/4842670")
+                except OSError as error:
+                    messagebox.showerror("게임 재실행 실패", str(error), parent=root)
             root.deiconify()
             root.mainloop()

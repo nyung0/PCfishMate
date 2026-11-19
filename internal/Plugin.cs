@@ -236,6 +236,7 @@ public sealed class Plugin : BasePlugin
                 Record(requested ? "자동화 시작" : "자동화 중지", "컨트롤러");
             bridgeEnabled = requested;
             var hearts = ReadHeartStatus();
+            var season = ReadSeasonStatus();
             var status = Path.Combine(bridge, "status.json");
             var temporary = status + ".tmp";
             File.WriteAllText(temporary, JsonSerializer.Serialize(new {
@@ -246,6 +247,7 @@ public sealed class Plugin : BasePlugin
                       || (command?.TankUpgrade == true && upgradeHookReady && !upgradeFailed)
                     : enabled.Value && !breedFailed,
                 Message = message,
+                Season = season,
                 FishCapacity = ReadFishCapacity(),
                 GameRoot = Paths.GameRootPath,
                 HeartCount = hearts.Count,
@@ -840,6 +842,34 @@ public sealed class Plugin : BasePlugin
         catch (Exception)
         {
             return (count, heartConfig?.Max, null);
+        }
+    }
+
+    private object? ReadSeasonStatus()
+    {
+        try
+        {
+            var type = data?.GetType().Assembly.GetType("NN.PF.Core.CommonData");
+            const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static;
+            object? Value(string name) =>
+                type?.GetProperty(name, flags)?.GetValue(null) ?? type?.GetField(name, flags)?.GetValue(null);
+            var id = Convert.ToInt32(Value("seasonId"), CultureInfo.InvariantCulture);
+            long? Timestamp(object? value)
+            {
+                var text = value?.ToString();
+                if (long.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var timestamp))
+                    return timestamp > 100_000_000_000 ? timestamp / 1000 : timestamp;
+                return DateTimeOffset.TryParse(text, CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeUniversal, out var date) ? date.ToUnixTimeSeconds() : null;
+            }
+            var start = Timestamp(Value("seasonStartTime"));
+            var finish = Timestamp(Value("seasonFinishTime"));
+            return id > 0 && start is not null && finish > start
+                ? new { Id = id, Start = start.Value, Finish = finish.Value } : null;
+        }
+        catch (Exception)
+        {
+            return null;
         }
     }
 

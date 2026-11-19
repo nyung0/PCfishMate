@@ -33,6 +33,20 @@ def rounded_image(root, width, height, radius, fill, outline=None, bevel=False):
     return image
 
 
+def tab_image(root, fill, outline, connected=False):
+    width, height, radius = 40, 36, 10
+    image = tk.PhotoImage(master=root, width=width, height=height)
+    for y in range(height):
+        edge = max(0, radius - y)
+        inset = radius - isqrt(radius * radius - edge * edge)
+        image.put(outline, to=(inset, y, width - inset, y + 1))
+        if y >= 2:
+            image.put(fill, to=(inset + 2, y, width - inset - 2, y + 1))
+    if not connected:
+        image.put(outline, to=(0, height - 2, width, height))
+    return image
+
+
 def rounded_card(canvas, x, y, right, bottom, fill, outline, radius=12):
     points = (x, y + radius, x, y, x + radius, y, right - radius, y,
               right, y, right, y + radius, right, bottom - radius,
@@ -82,10 +96,25 @@ def ocean_style(root):
     style.map("TCombobox", fieldbackground=[("readonly", PANEL)],
               foreground=[("readonly", TEXT)])
     style.configure("TNotebook", borderwidth=0)
-    style.configure("TNotebook.Tab", background=PANEL, padding=(18, 8))
-    style.map("TNotebook.Tab", background=[("selected", WATER)],
-              padding=[("selected", (26, 12))],
-              font=[("selected", ("Malgun Gothic", 11, "bold"))])
+    tab_normal = tab_image(root, PANEL, "#416D99")
+    tab_selected = tab_image(root, OCEAN, "#9BC9EC", connected=True)
+    tab_hover = tab_image(root, "#2E6596", "#86B9E1")
+    root.button_images.extend((tab_normal, tab_selected, tab_hover))
+    style.element_create("Ocean.tab", "image", tab_normal, ("selected", tab_selected),
+                         ("active", tab_hover), border=12, padding=0, sticky="nsew")
+    style.layout("TNotebook.Tab", [("Ocean.tab", {"sticky": "nsew", "children": [
+        ("Notebook.padding", {"sticky": "nsew", "children": [
+            ("Notebook.label", {"sticky": ""}),
+        ]}),
+    ]})])
+    client = tk.PhotoImage(master=root, width=12, height=12)
+    client.put("#9BC9EC", to=(0, 0, 12, 12))
+    client.put(OCEAN, to=(2, 2, 10, 10))
+    root.button_images.append(client)
+    style.element_create("Ocean.client", "image", client, border=2, padding=2, sticky="nsew")
+    style.layout("TNotebook", [("Ocean.client", {"sticky": "nsew"})])
+    style.configure("TNotebook", tabmargins=(0, 0, 0, -2))
+    style.configure("TNotebook.Tab", padding=(18, 7), font=("Malgun Gothic", 10, "bold"))
     style.configure("Treeview", background=PANEL, fieldbackground=PANEL, foreground=TEXT,
                     rowheight=27, bordercolor=EDGE)
     style.configure("Treeview.Heading", background=WATER, foreground=TEXT, relief="flat")
@@ -112,6 +141,78 @@ def ocean_style(root):
     ]})])
 
 
+def game_notebook_frame(root, source, notebook):
+    style = ttk.Style(root)
+    width, height = source.width(), source.height()
+    frame = tk.PhotoImage(master=root, width=width, height=height)
+    frame.tk.call(frame, "copy", source)
+    frame.put(OCEAN, to=(8, 8, width - 8, height - 8))
+    tabs = []
+    for fill, connected in ((PANEL, False), (OCEAN, True), (WATER, False)):
+        tab_height = 32
+        tab = tk.PhotoImage(master=root, width=width, height=tab_height)
+        tab.tk.call(tab, "copy", source, "-from", 0, 0, width, 16, "-to", 0, 0)
+        tab.tk.call(tab, "copy", source, "-from", 0, height - 16, width, height, "-to", 0, 16)
+        tab.put(fill, to=(4, 4, width - 4, tab_height - 4))
+        if connected:
+            tab.put(fill, to=(4, tab_height - 8, width - 4, tab_height))
+            for y in range(tab_height - 8, tab_height):
+                tab.tk.call(tab, "copy", source, "-from", 0, 24, 4, 25, "-to", 0, y)
+                tab.tk.call(tab, "copy", source, "-from", width - 4, 24, width, 25,
+                            "-to", width - 4, y)
+        tabs.append(tab)
+    root.button_images.extend((frame, *tabs))
+    normal, selected, hover = tabs
+    style.element_create("GameFrame.client", "image", frame, border=8, padding=8, sticky="nsew")
+    style.element_create("GameFrame.tab", "image", normal, ("selected", selected),
+                         ("active", hover), border=8, padding=0, sticky="nsew")
+    style.layout("TNotebook", [("GameFrame.client", {"sticky": "nsew"})])
+    style.layout("TNotebook.Tab", [("GameFrame.tab", {"sticky": "nsew", "children": [
+        ("Notebook.padding", {"sticky": "nsew", "children": [
+            ("Notebook.label", {"sticky": ""}),
+        ]}),
+    ]})])
+    style.configure("TNotebook", tabmargins=(0, 0, 0, -2))
+    style.configure("TNotebook.Tab", anchor="center", padding=(18, 7), expand=(0, 0, 0, 0))
+    style.map("TNotebook.Tab",
+              padding=[("selected", (18, 7)), ("!selected", (18, 7))],
+              expand=[("selected", (0, 0, 0, 0)), ("!selected", (0, 0, 0, 0))],
+              font=[("selected", ("Malgun Gothic", 10, "bold")),
+                    ("!selected", ("Malgun Gothic", 10, "bold"))])
+    seam = tk.Frame(notebook, bg=OCEAN, borderwidth=0, highlightthickness=0)
+
+    def connect_selected_tab(_event=None):
+        selected_tab = notebook.select()
+        if not selected_tab:
+            seam.place_forget()
+            return
+        index = notebook.index(selected_tab)
+        # ttk does not expose tab bounds through bbox on Windows.
+        positions = [(x, notebook.identify(x, 10)) for x in range(notebook.winfo_width())]
+        pixels = [x for x, element in positions
+                  if element and notebook.index(f"@{x},10") == index]
+        if not pixels:
+            seam.place_forget()
+            return
+        x = pixels[0]
+        right = pixels[-1] + 1
+        y = 10
+        while y < notebook.winfo_height():
+            try:
+                if notebook.index(f"@{(x + right) // 2},{y}") != index:
+                    break
+            except tk.TclError:
+                break
+            y += 1
+        seam.place(x=x + 3, y=y - 5, width=max(1, right - x - 6), height=14)
+        seam.lift()
+
+    notebook.bind("<<NotebookTabChanged>>", connect_selected_tab, add="+")
+    notebook.bind("<Configure>", connect_selected_tab, add="+")
+    notebook.after_idle(connect_selected_tab)
+
+
+
 class CardGrid(ttk.Frame):
     def __init__(self, parent, select_card=None, card_width=156, toggle_favorite=None):
         super().__init__(parent)
@@ -124,12 +225,16 @@ class CardGrid(ttk.Frame):
         self.canvas.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side="right", fill="y")
         self.canvas.pack(side="left", fill="both", expand=True)
-        self.canvas.bind("<Configure>", lambda _event: self.draw())
+        self.canvas.bind("<Configure>", self.resize)
         self.canvas.bind("<MouseWheel>", self.wheel)
         if select_card:
             self.canvas.bind("<Button-1>", lambda event: self.select(event, select_card))
         if toggle_favorite:
             self.canvas.bind("<Button-1>", self.click_favorite, add="+")
+
+    def resize(self, event):
+        if event.width != getattr(self, "_drawn_width", None):
+            self.draw()
 
     def click_favorite(self, event):
         x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
@@ -163,7 +268,8 @@ class CardGrid(ttk.Frame):
     def draw(self):
         canvas = self.canvas
         canvas.delete("all")
-        width = max(self.card_width, canvas.winfo_width())
+        self._drawn_width = canvas.winfo_width()
+        width = max(self.card_width, self._drawn_width)
         columns = max(1, width // self.card_width)
         step = width / columns
         for i, (name, rarity, stars, detail, picture, state) in enumerate(self.cards):
