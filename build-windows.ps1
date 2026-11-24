@@ -16,7 +16,7 @@ try {
     $core = (Resolve-Path build/loader/BepInEx/core).Path
     dotnet build internal/PCFishInternal.csproj -c Release "-p:BepInExCore=$core" -o build/plugin
     if ($LASTEXITCODE) { exit $LASTEXITCODE }
-    python -m pip install --upgrade --target build/python pyinstaller==6.22.3 UnityPy==1.25.4
+    python -m pip install --upgrade --target build/python pyinstaller==6.22.3 UnityPy==1.25.4 pystray==0.19.5
     if ($LASTEXITCODE) { exit $LASTEXITCODE }
     $env:PYTHONPATH = (Resolve-Path build/python).Path
     # Sprite.image imports UnityPy.export, which eagerly imports the audio converter.

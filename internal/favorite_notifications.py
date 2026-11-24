@@ -17,7 +17,7 @@ from PIL import Image, ImageOps
 from catalog_tab import catalog_art
 
 APP_ID = "PCFish.Automation.Pink"
-DEFAULT_NOTIFICATION_SETTINGS = {"windows": False, "taskbar": False}
+DEFAULT_NOTIFICATION_SETTINGS = {"windows": False, "taskbar": False, "season_ready": False}
 SHORTCUT_LOCK = Lock()
 SHOW_TOAST = """
 $ErrorActionPreference = 'Stop'
@@ -140,7 +140,7 @@ def register_notification_shortcut(executable):
         winreg.SetValueEx(key, "PCfishMateShortcutTarget", 0, winreg.REG_SZ, str(executable))
 
 
-def show_fish_toast(name, picture=None, *, stars=None):
+def show_fish_toast(name, picture=None, *, stars=None, ending="나왔다!"):
     with SHORTCUT_LOCK:
         if getattr(sys, "frozen", False):
             try:
@@ -156,7 +156,7 @@ def show_fish_toast(name, picture=None, *, stars=None):
     toast = ET.Element("toast")
     binding = ET.SubElement(ET.SubElement(toast, "visual"), "binding", template="ToastGeneric")
     label = name if stars is None else f"{stars}성 {name}"
-    ET.SubElement(binding, "text").text = f"{label} 나왔다!"
+    ET.SubElement(binding, "text").text = f"{label} {ending}"
     if picture is not None and picture.is_file():
         ET.SubElement(binding, "image", placement="appLogoOverride", src=picture.resolve().as_uri())
     env = os.environ.copy()
@@ -173,7 +173,7 @@ def show_fish_toast(name, picture=None, *, stars=None):
         run_notification_script(SHOW_TOAST, env)
 
 
-def notify_favorites(game, cache, notifications, enabled):
+def notify_favorites(game, cache, notifications, enabled, *, ending="나왔다!"):
     pictures = {}
     try:
         pictures = catalog_art(game, {variant for variant, _, _ in notifications})
@@ -201,7 +201,7 @@ def notify_favorites(game, cache, notifications, enabled):
                 except OSError:
                     pass
         try:
-            show_fish_toast(name, picture, stars=stars)
+            show_fish_toast(name, picture, stars=stars, ending=ending)
         except (OSError, KeyError, subprocess.SubprocessError) as error:
             logging.exception("Could not show favorite fish notification")
             try:

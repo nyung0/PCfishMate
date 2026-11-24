@@ -388,11 +388,30 @@ def season_merge_exclusions(game):
     assets = (game / "PCFish_Data/resources.assets").read_bytes()
     tables = re.findall(rb"recipeFishGrade,recipeAmount\r?\n((?:[0-9][^\x00\r\n]+\r?\n?)+)", assets)
     rows = [row for table in tables for row in re.findall(
-        rb"(?m)^\d+,(FS\d{5}),\d+,(FS\d{5}),(\d+),\d+", table)]
+        rb"(?m)^(\d+),(FS\d{5}),\d+,(FS\d{5}),(\d+),\d+", table)]
     if not rows:
         raise ValueError("게임에서 시즌 합성 재료 목록을 확인할 수 없습니다.")
-    return sorted({target.decode() for target, _, _ in rows}), sorted({
-        f"{material.decode()}:{int(grade)}" for _, material, grade in rows})
+    materials = {}
+    for season, _, material, grade in rows:
+        materials.setdefault(int(season), set()).add(f"{material.decode()}:{int(grade)}")
+    return sorted({target.decode() for _, target, _, _ in rows}), {
+        season: sorted(values) for season, values in materials.items()
+    }
+
+
+def active_merge_season(game):
+    path = BRIDGE / "status.json"
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+        if time.time() - path.stat().st_mtime >= 5 or Path(state["GameRoot"]).resolve() != game.resolve():
+            return None
+        season = state["Season"]
+        if (not isinstance(season, dict) or any(type(season.get(key)) is not int
+                for key in ("Id", "Start", "Finish"))):
+            return None
+        return season["Id"] if season["Start"] <= time.time() < season["Finish"] else 0
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+        return None
 
 
 class ShellExecuteInfo(ctypes.Structure):
@@ -800,7 +819,9 @@ class Controller:
                 lambda: set_taskbar_icon(root, icon)) if event.widget is root else None, add="+")
         root.geometry("820x650")
         root.minsize(670, 410)
-        root.protocol("WM_DELETE_WINDOW", self.close)
+        self.tray = None
+        self.tray_actions = Queue()
+        root.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
         ocean_style(root)
         title_bar = tk.Frame(root, bg=WATER)
         title_bar.pack(fill="x")
@@ -846,7 +867,10 @@ class Controller:
         panel = ttk.Frame(tabs, padding=16)
         tabs.add(panel, text="자동화")
         self.catalog_tab = catalog = CatalogTab(tabs, self.game_path, BRIDGE / "favorites.json")
-        season = SeasonTab(tabs, self.game_path, catalog)
+        season = SeasonTab(
+            tabs, self.game_path, catalog, ready_enabled=self.notification_settings["season_ready"],
+            save_ready=self.save_season_notification, notify_ready=self.send_season_notifications,
+        )
         tabs.add(season, text="시즌합성")
         tabs.add(catalog, text="도감")
 
@@ -910,6 +934,7 @@ class Controller:
         self.merge_rarities = [tk.BooleanVar(value=True) for _ in range(5)]
         self.merge_star_flags = [tk.BooleanVar(value=True) for _ in range(5)]
         self.merge_exclusions = None
+        self.merge_exclusions_key = None
         for label, flag, sprite in (("교배 자동화", self.breed_enabled, "Icon_BreedHeart"),
                                     ("수조 레벨업 자동화", self.upgrade_enabled, "Icon_LvUp"),
                                     ("합성 자동화", self.merge_enabled, "Icon_Merge")):
@@ -1048,7 +1073,7 @@ class Controller:
         draft = {}
 
         def save():
-            settings = {key: value.get() for key, value in draft.items()}
+            settings = dict(self.notification_settings, **{key: value.get() for key, value in draft.items()})
             if not self.save_notification_settings(settings, window):
                 for key, value in draft.items():
                     value.set(self.notification_settings[key])
@@ -1151,9 +1176,18 @@ class Controller:
 
     def mode_settings(self):
         zero, placed, season, materials = (flag.get() for flag in self.merge_filters)
-        if self.merge_enabled.get() and (season or materials) and self.merge_exclusions is None:
-            self.merge_exclusions = season_merge_exclusions(Path(self.game_path.get()))
-        season_ids, material_ids = self.merge_exclusions or ([], [])
+        game = Path(self.game_path.get())
+        season_ids, material_ids = [], None
+        if self.merge_enabled.get() and (season or materials):
+            stamp = (game / "PCFish_Data/resources.assets").stat().st_mtime_ns
+            key = game, stamp
+            if key != self.merge_exclusions_key:
+                self.merge_exclusions = season_merge_exclusions(game)
+                self.merge_exclusions_key = key
+            season_ids, by_season = self.merge_exclusions
+            current = active_merge_season(game)
+            if current is not None:
+                material_ids = by_season.get(current) if current else []
         return {
             "Breed": self.breed_enabled.get(), "TankUpgrade": self.upgrade_enabled.get(),
             "AutoMerge": self.merge_enabled.get(), "SameBreedRarity": self.same_breed.get(),
@@ -1462,6 +1496,18 @@ class Controller:
         if notifications:
             self.send_favorite_notifications(game, list(reversed(notifications)))
 
+    def save_season_notification(self, enabled):
+        settings = dict(self.notification_settings, season_ready=enabled)
+        return self.save_notification_settings(settings, self.root)
+
+    def send_season_notifications(self, game, notifications):
+        if self.notification_settings["taskbar"]:
+            flash_taskbar(self.root)
+        Thread(target=notify_favorites, args=(
+            game, BRIDGE / "notification-art", notifications,
+            lambda: self.notification_settings["season_ready"],
+        ), kwargs={"ending": "합성이 가능합니다!"}, daemon=True).start()
+
     def send_favorite_notifications(self, game, notifications):
         if self.notification_settings["taskbar"]:
             flash_taskbar(self.root)
@@ -1533,7 +1579,58 @@ class Controller:
         self.command.update(modes)
         self.tick_status()
 
+    def show_window(self):
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def hide_to_tray(self):
+        if self.tray is None:
+            try:
+                import pystray
+                from PIL import Image
+                with Image.open(ASSETS / "pcfish.ico") as image:
+                    icon = image.convert("RGBA")
+                def action(name):
+                    return lambda *_: self.tray_actions.put(name)
+                tray = pystray.Icon(APP_ID, icon, APP_NAME, menu=pystray.Menu(
+                    pystray.MenuItem("열기", action("show"), default=True),
+                    pystray.MenuItem("자동화 시작", action("start")),
+                    pystray.MenuItem("자동화 중지", action("stop")),
+                    pystray.Menu.SEPARATOR,
+                    pystray.MenuItem("끝내기", action("exit")),
+                ))
+                tray.run_detached()
+                self.tray = tray
+            except (ImportError, OSError, RuntimeError) as error:
+                messagebox.showerror("트레이 실행 실패", str(error), parent=self.root)
+                return
+        if self.settings_window is not None and self.settings_window.winfo_exists():
+            self.settings_window.destroy()
+        if self.log_window is not None and self.log_window.winfo_exists():
+            self.log_window.destroy()
+        self.root.withdraw()
+
+    def poll_tray(self):
+        try:
+            action = self.tray_actions.get_nowait()
+        except Empty:
+            return False
+        if action == "exit":
+            self.close()
+            return True
+        if action == "show":
+            self.show_window()
+        elif action == "start":
+            self.start()
+        elif action == "stop":
+            self.stop()
+        return False
+
     def close(self):
+        if self.tray is not None:
+            self.tray.stop()
+            self.tray = None
         if self.pending_update is not None:
             staged = self.pending_update
             try:
@@ -1599,6 +1696,11 @@ class Controller:
                     heart_state = state
                     self.connection_deadline = None
                     if self.command:
+                        if self.command.get("AutoMerge") and self.command.get("Merge", {}).get("ExcludeSeasonMaterials"):
+                            try:
+                                self.command.update(self.mode_settings())
+                            except (OSError, ValueError):
+                                self.command["Merge"]["SeasonMaterials"] = None
                         self.write(self.command)
             else:
                 self.status.set("게임 플러그인 연결 대기 중")
@@ -1615,6 +1717,8 @@ class Controller:
         self.start_button.state(["disabled"] if self.connection_deadline is not None else ["!disabled"])
 
     def tick(self):
+        if self.poll_tray():
+            return
         self.tick_status()
         self.refresh_log()
         self.refresh_log_version()

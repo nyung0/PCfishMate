@@ -117,10 +117,14 @@ def season_material_stock(game, state):
 
 
 class SeasonTab(ttk.Frame):
-    def __init__(self, parent, game_path, catalog):
+    def __init__(self, parent, game_path, catalog, *, ready_enabled=False, save_ready=None, notify_ready=None):
         super().__init__(parent, padding=16)
         self.game_path = game_path
         self.catalog = catalog
+        self.ready_notifications = tk.BooleanVar(value=ready_enabled)
+        self.save_ready = save_ready
+        self.notify_ready = notify_ready
+        self.ready_recipes = set()
         self.material_variants = defaultdict(list)
         self.visible_materials = []
         self.result = Queue()
@@ -157,9 +161,13 @@ class SeasonTab(ttk.Frame):
         self.star_selector = tk.Frame(self, bg=OCEAN)
         self.star_selector.pack(anchor="center", pady=(0, 5))
         tk.Frame(self, bg=WATER, height=2).pack(fill="x", pady=(0, 4))
+        notification_options = ttk.Frame(self)
+        notification_options.pack(fill="x", pady=(1, 3))
         self.zero_breeds_only = tk.BooleanVar(value=False)
-        ttk.Checkbutton(self, text="남은 교배 0회 재료만", variable=self.zero_breeds_only,
-                        style="Ocean.TCheckbutton", command=self.draw).pack(anchor="w", pady=(1, 3))
+        ttk.Checkbutton(notification_options, text="남은 교배 0회 재료만", variable=self.zero_breeds_only,
+                        style="Ocean.TCheckbutton", command=self.draw).pack(side="left", padx=(0, 16))
+        ttk.Checkbutton(notification_options, text="합성 가능 알림", variable=self.ready_notifications,
+                        style="Ocean.TCheckbutton", command=self.toggle_ready_notifications).pack(side="left")
         ttk.Label(self, textvariable=self.summary, wraplength=640).pack(anchor="w", pady=(0, 4))
         self.grid_view = CardGrid(self, card_width=110, toggle_favorite=self.toggle_favorite)
         self.grid_view.pack(fill="both", expand=True)
@@ -171,7 +179,7 @@ class SeasonTab(ttk.Frame):
         self.after(1800, self.refresh_periodically)
 
     def refresh(self):
-        if self.loading or not self.winfo_viewable():
+        if self.loading or (not self.winfo_viewable() and not self.ready_notifications.get()):
             return
         self.draw()
         install = Path(self.game_path.get())
@@ -383,10 +391,36 @@ class SeasonTab(ttk.Frame):
                 command=lambda stars=count: self.select_recipe(selected_name, stars),
             )
 
+    def toggle_ready_notifications(self):
+        enabled = self.ready_notifications.get()
+        if self.save_ready is not None and not self.save_ready(enabled):
+            self.ready_notifications.set(not enabled)
+            return
+        self.ready_recipes.clear()
+        self.refresh()
+
+    def check_ready_notifications(self):
+        if not self.ready_notifications.get():
+            self.ready_recipes.clear()
+            return
+        ready = {key for key in self.recipes
+                 if all(self.stock[material] >= need for material, need in self.game.recipes[key].items())}
+        newly_ready = ready - self.ready_recipes
+        self.ready_recipes = ready
+        notifications = []
+        for _, name, stars in sorted(newly_ready):
+            base_grade = min(grade for _, target, grade in self.recipes if target == name)
+            _, variant = self.variants.get((name, base_grade), (0, None))
+            if variant:
+                notifications.append((variant, name, stars))
+        if notifications and self.notify_ready is not None:
+            self.notify_ready(Path(self.game_path.get()), notifications)
+
     def draw(self):
         if self.stock is None:
             return
         self.update_season()
+        self.check_ready_notifications()
         if self.selected_recipe is None:
             self.summary.set("진행 중인 시즌의 합성 재료만 표시합니다.")
             self.grid_view.set_cards([])

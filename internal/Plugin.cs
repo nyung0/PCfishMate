@@ -539,7 +539,7 @@ public sealed class Plugin : BasePlugin
             return false;
         if ((options.ExcludeSeason && (options.SeasonIds is not { Length: > 0 } ||
                 options.SeasonIds.Contains(species))) ||
-            (options.ExcludeSeasonMaterials && (options.SeasonMaterials is not { Length: > 0 } ||
+            (options.ExcludeSeasonMaterials && (options.SeasonMaterials is null ||
                 options.SeasonMaterials.Contains($"{species}:{stars}"))))
             return false;
         return Read(item, "BreedNextDatetime") is not string { Length: > 0 } date ||
