@@ -1,8 +1,10 @@
+import ctypes
 import json
 import re
 import time
 import tkinter as tk
 from colorsys import hsv_to_rgb, rgb_to_hsv
+from ctypes import wintypes
 from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Empty, Queue
@@ -12,19 +14,59 @@ from uuid import uuid4
 
 from PIL import Image, ImageTk
 
-from fish_color_assets import FishColorLibrary, paint_stroke, recolor, replace_color, sprite_palette
+from fish_color_assets import FishColorLibrary, brush_stamp, paint_stroke, recolor, replace_color, sprite_palette
 from ocean_ui import ACCENT, EDGE, MUTED, OCEAN as BG, PANEL, TEXT as INK, WATER as SURFACE, rounded_image
 
 
 FONT = "Malgun Gothic"
 CHECKER = "#152F52"
 HEX = re.compile(r"#?([a-fA-F0-9]{6})")
+DRAWING_TOOLS = {
+    "hand": ("이동", "H", "드래그로 화면 이동 · Space"),
+    "brush": ("브러시", "B", "드래그해서 칠하기"),
+    "bucket": ("페인트통", "G", "이어진 같은 색 채우기"),
+    "eyedropper": ("스포이드", "I", "클릭해서 색 가져오기 · Alt+클릭"),
+}
+DRAWING_SHORTCUTS = {shortcut: tool for tool, (_, shortcut, _) in DRAWING_TOOLS.items()}
+
+
+def guard_canvas_window_menu(canvas):
+    # Alt+Space can reach the native window menu before a Tk binding can stop it.
+    wm_syschar, wm_syscommand, sc_keymenu = 0x0106, 0x0112, 0xF100
+    alt_context = 1 << 29
+    frame = int(str(canvas.winfo_toplevel().wm_frame()), 0)
+    controls = ctypes.WinDLL("comctl32")
+    message_args = (wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+    subclass = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, *message_args, ctypes.c_size_t, ctypes.c_size_t)
+    controls.SetWindowSubclass.argtypes = (wintypes.HWND, subclass, ctypes.c_size_t, ctypes.c_size_t)
+    controls.SetWindowSubclass.restype = wintypes.BOOL
+    controls.RemoveWindowSubclass.argtypes = (wintypes.HWND, subclass, ctypes.c_size_t)
+    controls.RemoveWindowSubclass.restype = wintypes.BOOL
+    controls.DefSubclassProc.argtypes = message_args
+    controls.DefSubclassProc.restype = ctypes.c_ssize_t
+
+    @subclass
+    def dispatch(hwnd, message, wparam, lparam, _id, _data):
+        menu = message == wm_syscommand and wparam & 0xFFF0 == sc_keymenu and lparam == ord(" ")
+        system_space = message == wm_syschar and wparam == ord(" ") and lparam & alt_context
+        if menu or system_space:
+            try:
+                if canvas.winfo_ismapped() and canvas.focus_get() is canvas:
+                    return 0
+            except (tk.TclError, KeyError):
+                pass
+        return controls.DefSubclassProc(hwnd, message, wparam, lparam)
+
+    if not controls.SetWindowSubclass(frame, dispatch, 0, 0):
+        return False
+    canvas.bind("<Destroy>", lambda _event: controls.RemoveWindowSubclass(frame, dispatch, 0), add="+")
+    return True
 
 
 def drawing_tool_icons(master):
     folder = Path(__file__).with_name("color-tools")
     icons = {}
-    for name in ("hand", "brush", "bucket"):
+    for name in DRAWING_TOOLS:
         with Image.open(folder / f"{name}.png") as asset:
             image = asset.convert("RGBA")
         alpha = image.getchannel("A")
@@ -53,7 +95,7 @@ class Draft:
 class PixelView(tk.Canvas):
     ZOOM_LEVELS = (1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 16, 20, 24, 32)
 
-    def __init__(self, parent, on_pick=None, on_drag=None, on_release=None, *, hand_tool=None):
+    def __init__(self, parent, on_pick=None, on_drag=None, on_release=None, *, hand_tool=None, on_alt_pick=None):
         super().__init__(parent, bg=BG, highlightthickness=0, width=160, height=160,
                          cursor="crosshair" if on_pick else "arrow")
         self.sprite = None
@@ -65,39 +107,61 @@ class PixelView(tk.Canvas):
         self.offset = (0, 0)
         self.visible_bounds = None
         self.pan_anchor = None
+        self.pointer = None
+        self.brush_mask = None
+        self.brush_size = 1
+        self.brush_outline_point = None
+        self.window_menu_guarded = False
         self.hand_tool = hand_tool
+        self.alt_down = False
         self.space_down = False
         self.left_down = False
         self.left_panning = False
+        self.left_sampling = False
         self.bind("<Configure>", lambda event: self.draw())
         if on_pick is not None:
             self.configure(takefocus=True)
-            self.bind("<Enter>", self.focus_view)
+            self.bind("<Enter>", self.enter)
+            self.bind("<Motion>", self.track_pointer)
+            self.bind("<Leave>", self.clear_pointer)
+            self.bind("<Unmap>", self.clear_pointer)
             self.bind("<KeyPress-space>", self.press_space)
             self.bind("<KeyRelease-space>", self.release_space)
-            self.bind("<FocusOut>", self.release_space)
+            self.bind("<Alt-KeyPress-space>", self.press_space)
+            self.bind("<Alt-KeyRelease-space>", self.release_space)
+            for key in ("Alt_L", "Alt_R"):
+                self.bind(f"<KeyPress-{key}>", self.press_alt)
+                self.bind(f"<KeyRelease-{key}>", self.release_alt)
+            self.bind("<FocusOut>", self.reset_modifiers)
+            if self.tk.call("tk", "windowingsystem") == "win32":
+                self.bind("<Map>", self.guard_window_menu)
             self.bind("<MouseWheel>", self.zoom_wheel)
             for button in (2, 3):
                 self.bind(f"<ButtonPress-{button}>", self.start_pan)
                 self.bind(f"<B{button}-Motion>", self.pan)
                 self.bind(f"<ButtonRelease-{button}>", self.finish_pan)
         if on_pick is not None:
-            def press(event):
+            def press(event, *, alternate=False):
                 self.focus_set()
                 self.left_down = True
-                self.left_panning = self.wants_pan()
+                self.left_panning = self.space_down if alternate else self.wants_pan()
+                self.left_sampling = alternate and not self.left_panning
                 if self.left_panning:
                     self.start_pan(event)
                 else:
-                    self.pick(event, on_pick)
+                    self.pick(event, on_alt_pick if alternate else on_pick)
+                self.track_pointer(event)
 
             self.bind("<Button-1>", press)
+            if on_alt_pick is not None:
+                self.bind("<Alt-Button-1>", lambda event: press(event, alternate=True))
         if on_drag is not None:
             def drag(event):
                 if self.left_panning:
                     self.pan(event)
                 else:
                     self.pick(event, on_drag, allow_outside=True)
+                self.track_pointer(event)
 
             self.bind("<B1-Motion>", drag)
         if on_release is not None:
@@ -108,19 +172,29 @@ class PixelView(tk.Canvas):
                     self.update_cursor()
                 elif on_drag is not None:
                     self.pick(event, on_drag, allow_outside=True)
-                self.left_down = False
+                self.left_down = self.left_sampling = False
                 on_release()
+                self.track_pointer(event)
 
             self.bind("<ButtonRelease-1>", release)
 
     def focus_view(self, _event=None):
         self.focus_set()
 
+    def enter(self, event):
+        self.focus_view()
+        self.track_pointer(event)
+
+    def guard_window_menu(self, _event):
+        if not self.window_menu_guarded:
+            self.window_menu_guarded = guard_canvas_window_menu(self)
+
     def wants_pan(self):
         return self.space_down or (self.hand_tool is not None and self.hand_tool())
 
     def update_cursor(self):
         self.configure(cursor="hand2" if self.wants_pan() or self.left_panning else "crosshair")
+        self.draw_brush_outline()
 
     def press_space(self, _event):
         # Let an in-progress brush stroke finish with the original tool.
@@ -134,13 +208,64 @@ class PixelView(tk.Canvas):
         self.update_cursor()
         return "break"
 
+    def press_alt(self, _event):
+        self.alt_down = True
+        self.draw_brush_outline()
+
+    def release_alt(self, _event):
+        self.alt_down = False
+        self.draw_brush_outline()
+
+    def reset_modifiers(self, _event):
+        self.alt_down = self.space_down = False
+        self.update_cursor()
+
+    def track_pointer(self, event):
+        self.pointer = (event.x, event.y)
+        self.draw_brush_outline()
+
+    def clear_pointer(self, _event):
+        self.pointer = None
+        self.draw_brush_outline()
+
+    def image_point(self, x, y):
+        left, top = self.origin
+        return (x - left) // self.scale, (y - top) // self.scale
+
+    def set_brush_preview(self, original, size):
+        if original is not self.brush_mask or size != self.brush_size:
+            self.brush_mask, self.brush_size = original, size
+            self.draw_brush_outline(force=True)
+
+    def draw_brush_outline(self, *, force=False):
+        point = None
+        sampling = self.left_sampling or (self.alt_down and not self.left_down)
+        if (self.pointer is not None and self.brush_mask is not None and self.sprite is not None
+                and not (sampling or self.wants_pan() or self.left_panning or self.pan_anchor is not None)):
+            x, y = self.pointer
+            if 0 <= x < self.winfo_width() and 0 <= y < self.winfo_height():
+                px, py = self.image_point(x, y)
+                if self.left_down or (0 <= px < self.sprite.width and 0 <= py < self.sprite.height):
+                    point = (px, py)
+        if point == self.brush_outline_point and not force:
+            return
+        self.delete("brush-outline")
+        self.brush_outline_point = point
+        if point is not None:
+            region = {(x, y) for x, y, _ in brush_stamp(self.brush_mask, point, self.brush_size)}
+            edges = list(self.pixel_edges(region))
+            if self.scale >= 4:
+                for edge in edges:
+                    self.create_line(*edge, fill=BG, width=3, tags="brush-outline")
+            for edge in edges:
+                self.create_line(*edge, fill=INK, tags="brush-outline")
+
     def pick(self, event, callback, *, allow_outside=False):
         if self.sprite is None:
             return
-        left, top = self.origin
         x = min(max(0, event.x), self.winfo_width() - 1) if allow_outside else event.x
         y = min(max(0, event.y), self.winfo_height() - 1) if allow_outside else event.y
-        x, y = (x - left) // self.scale, (y - top) // self.scale
+        x, y = self.image_point(x, y)
         if allow_outside or (0 <= x < self.sprite.width and 0 <= y < self.sprite.height):
             callback((x, y))
 
@@ -177,17 +302,20 @@ class PixelView(tk.Canvas):
     def start_pan(self, event):
         self.focus_set()
         self.pan_anchor = (event.x, event.y)
+        self.track_pointer(event)
 
     def pan(self, event):
         if self.sprite is not None and self.pan_anchor is not None:
             x, y = self.pan_anchor
             self.offset = (self.offset[0] + event.x - x, self.offset[1] + event.y - y)
             self.pan_anchor = (event.x, event.y)
+            self.pointer = self.pan_anchor
             self.draw()
 
     def finish_pan(self, event):
         self.pan(event)
         self.pan_anchor = None
+        self.track_pointer(event)
 
     def display(self, sprite, region=()):
         region = set(region)
@@ -206,6 +334,7 @@ class PixelView(tk.Canvas):
 
     def draw(self):
         self.delete("all")
+        self.brush_outline_point = None
         width, height = self.winfo_width(), self.winfo_height()
         if self.sprite is None:
             return
@@ -227,7 +356,15 @@ class PixelView(tk.Canvas):
                     self.create_rectangle(x, y, x + 16, y + 16, fill=CHECKER, width=0)
         self.picture = ImageTk.PhotoImage(self.enlarged_sprite())
         self.create_image(left + x0 * scale, top + y0 * scale, anchor="nw", image=self.picture)
-        for x, y in self.region:
+        for edge in self.pixel_edges(self.region):
+            self.create_line(*edge, fill=ACCENT)
+        self.draw_brush_outline()
+
+    def pixel_edges(self, region):
+        x0, y0, x1, y1 = self.visible_bounds
+        left, top = self.origin
+        scale = self.scale
+        for x, y in region:
             if not (x0 <= x < x1 and y0 <= y < y1):
                 continue
             px, py = left + x * scale, top + y * scale
@@ -237,8 +374,8 @@ class PixelView(tk.Canvas):
                 (0, -1, (px, py, px + scale, py)),
                 (0, 1, (px, py + scale, px + scale, py + scale)),
             ):
-                if (x + dx, y + dy) not in self.region:
-                    self.create_line(*coords, fill=ACCENT)
+                if (x + dx, y + dy) not in region:
+                    yield coords
 
 
 class ColorPicker(ttk.Frame):
@@ -445,8 +582,12 @@ class ColorTab(ttk.Frame):
         picker_panel.columnconfigure(0, weight=1, minsize=232)
         picker_panel.rowconfigure(1, weight=1)
         self.view = PixelView(editor, self.select_region, self.drag_brush, self.finish_brush,
-                              hand_tool=lambda: self.drawing and self.draw_tool.get() == "hand")
+                              hand_tool=lambda: self.drawing and self.draw_tool.get() == "hand",
+                              on_alt_pick=lambda point: self.select_region(point, sample=True))
         self.view.grid(row=1, column=0, sticky="nsew")
+        self.view.bind("<KeyPress>", self.draw_tool_shortcut)
+        for modifier in ("Alt", "Control"):
+            self.view.bind(f"<{modifier}-KeyPress>", lambda _event: None)
         selection = ttk.Frame(picker_panel, style="Color.Panel.TFrame")
         selection.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         ttk.Label(selection, text="편집 모드", style="Color.PanelMuted.TLabel").pack(side="left")
@@ -480,8 +621,8 @@ class ColorTab(ttk.Frame):
         tool_buttons = ttk.Frame(self.drawing_tools, style="Color.Panel.TFrame")
         tool_buttons.grid(row=0, column=0, sticky="ew")
         self.tool_icons = drawing_tool_icons(self)
-        for label, tool in (("이동", "hand"), ("브러시", "brush"), ("페인트통", "bucket")):
-            ttk.Radiobutton(tool_buttons, text=label, value=tool, variable=self.draw_tool,
+        for tool, (label, shortcut, _) in DRAWING_TOOLS.items():
+            ttk.Radiobutton(tool_buttons, text=f"{label} ({shortcut})", value=tool, variable=self.draw_tool,
                             image=self.tool_icons[tool], compound="image",
                             style="Color.Tool.TRadiobutton", command=self.focus_editor).pack(side="left", padx=(0, 6))
         brush_settings = self.brush_settings = ttk.Frame(self.drawing_tools, style="Color.Panel.TFrame")
@@ -493,7 +634,7 @@ class ColorTab(ttk.Frame):
         self.size_down.grid(row=0, column=0)
         self.brush_size = ttk.Scale(brush_settings, from_=1, to=5, orient="horizontal", length=120,
                                     style="Color.Brush.Horizontal.TScale",
-                                    command=lambda value: self.brush_size_text.set(f"{round(float(value))}px"))
+                                    command=self.update_brush_size)
         self.brush_size.set(1)
         self.brush_size.grid(row=0, column=1, sticky="ew", padx=5)
         self.brush_size.bind("<ButtonRelease-1>", self.finish_brush_size)
@@ -588,6 +729,11 @@ class ColorTab(ttk.Frame):
             self.brush_size.set(max(1, min(5, round(self.brush_size.get()) + step)))
         return "break"
 
+    def update_brush_size(self, value):
+        size = round(float(value))
+        self.brush_size_text.set(f"{size}px")
+        self.view.set_brush_preview(self.view.brush_mask, size)
+
     def finish_brush_size(self, _event):
         self.brush_size.set(round(self.brush_size.get()))
         self.view.focus_view()
@@ -595,6 +741,13 @@ class ColorTab(ttk.Frame):
     def focus_editor(self):
         self.view.focus_view()
         self.refresh_view()
+
+    def draw_tool_shortcut(self, event):
+        tool = DRAWING_SHORTCUTS.get(event.keysym.upper())
+        if tool is not None and self.drawing and not self.view.left_down:
+            self.draw_tool.set(tool)
+            self.focus_editor()
+            return "break"
 
     def refresh(self):
         if self.library is not None or self.loading:
@@ -770,22 +923,29 @@ class ColorTab(ttk.Frame):
         self.sync_hex()
         self.refresh_view()
 
-    def select_region(self, point):
+    def select_region(self, point, *, sample=False):
         if self.draft is None:
             return
         if self.drawing:
-            if self.draw_tool.get() == "bucket":
+            tool = "eyedropper" if sample else self.draw_tool.get()
+            if tool == "bucket":
                 before = self.draft.current
                 self.draft.current = replace_color(before, self.draft.original, point, self.paint_color)
                 if self.draft.current is not before:
                     self.draft.record_edit(before)
                     self.mark_unsaved()
                     self.refresh_view()
-            elif self.draw_tool.get() == "brush":
+            elif tool == "brush":
                 self.finish_brush()
                 self.stroke_before = self.draft.current
                 self.draft.current = self.draft.current.copy()
                 self.drag_brush(point)
+            elif tool == "eyedropper":
+                red, green, blue, alpha = self.draft.current.getpixel(point)
+                if alpha:
+                    color = (red, green, blue)
+                    self.picker.set_color(color)
+                    self.apply_picker_color(color)
             return
         for index, group in enumerate(self.draft.colors):
             if point in group.points:
@@ -935,6 +1095,8 @@ class ColorTab(ttk.Frame):
         else:
             self.brush_settings.grid_remove()
         brush_ready = self.draft is not None and brush_selected
+        original = self.draft.original if brush_ready else None
+        self.view.set_brush_preview(original, round(self.brush_size.get()))
         for widget in (self.brush_size, self.size_down, self.size_up):
             widget.state(["!disabled"] if brush_ready else ["disabled"])
 
@@ -942,15 +1104,8 @@ class ColorTab(ttk.Frame):
         outline = self.region if not self.drawing and self.outline_visible.get() else ()
         self.view.display(self.draft.current if self.draft else None, outline)
         self.view.update_cursor()
-        if self.drawing:
-            hint = {
-                "hand": "드래그로 화면 이동 · Space",
-                "brush": "드래그해서 칠하기",
-                "bucket": "이어진 같은 색 채우기",
-            }[self.draw_tool.get()]
-        else:
-            hint = ""
-        self.selection_text.set(hint)
+        _, shortcut, hint = DRAWING_TOOLS[self.draw_tool.get()]
+        self.selection_text.set(f"{shortcut} · {hint}" if self.drawing else "")
         for index, (button, swatch) in enumerate(self.color_buttons):
             anchor = self.draft.colors[index].anchor
             original = "#{:02x}{:02x}{:02x}".format(*self.draft.original.getpixel(anchor)[:3])

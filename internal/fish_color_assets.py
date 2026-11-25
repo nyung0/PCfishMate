@@ -193,19 +193,27 @@ def line_pixels(start, end):
             y += step_y
 
 
+def brush_stamp(original, center, size):
+    """Yield the pixels and original alpha that a single brush stamp can paint."""
+    mask = original.load()
+    inset = (size - 1) // 2
+    left, top = center[0] - inset, center[1] - inset
+    for y in range(max(0, top), min(original.height, top + size)):
+        for x in range(max(0, left), min(original.width, left + size)):
+            alpha = mask[x, y][3]
+            if alpha:
+                yield x, y, alpha
+
+
 def paint_stroke(image, original, start, end, size, color):
     """Paint a continuous pixel stroke, clipping every brush stamp to the original sprite."""
-    result, mask = image.load(), original.load()
-    inset = (size - 1) // 2
+    result = image.load()
     changed = False
-    for x, y in line_pixels(start, end):
-        left, top = x - inset, y - inset
-        for py in range(max(0, top), min(image.height, top + size)):
-            for px in range(max(0, left), min(image.width, left + size)):
-                alpha = mask[px, py][3]
-                if alpha and result[px, py][:3] != color:
-                    result[px, py] = (*color, alpha)
-                    changed = True
+    for point in line_pixels(start, end):
+        for x, y, alpha in brush_stamp(original, point, size):
+            if result[x, y][:3] != color:
+                result[x, y] = (*color, alpha)
+                changed = True
     return changed
 
 
