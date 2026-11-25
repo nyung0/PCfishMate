@@ -1,5 +1,43 @@
 # Requires PowerShell 7, Python 3.12 x64, and the .NET 6 SDK.
+param([ValidatePattern('^v\d+\.\d+\.\d+$')][string] $PreviousRelease)
+
 $ErrorActionPreference = 'Stop'
+
+function Restore-PublishedModule {
+    param([string] $Tag)
+
+    # An app-only update must carry the exact DLL that the existing updater compares by SHA-256.
+    git diff --quiet "refs/tags/$Tag" HEAD -- ':(glob)internal/**/*.cs' ':(glob)internal/**/*.csproj' `
+        ':(glob)**/Directory.Build.*' ':(glob)**/Directory.Packages.props' ':(glob)**/global.json'
+    if ($LASTEXITCODE -eq 1) { return }
+    if ($LASTEXITCODE) { throw "Could not compare module sources with $Tag" }
+
+    $api = "https://api.github.com/repos/nyung0/PCfishMate/releases/tags/$Tag"
+    $release = Invoke-RestMethod $api -Headers @{ Accept = 'application/vnd.github+json' }
+    $url = "https://github.com/nyung0/PCfishMate/releases/download/$Tag/PCfishMate.exe"
+    $asset = $release.assets | Where-Object { $_.browser_download_url -ceq $url } | Select-Object -First 1
+    if (!$asset -or $asset.digest -cnotmatch '^sha256:[0-9a-f]{64}$') {
+        throw "Could not verify the published executable for $Tag"
+    }
+    $previousExe = 'build/previous-PCfishMate.exe'
+    Invoke-WebRequest $url -OutFile $previousExe
+    $hash = (Get-FileHash $previousExe -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ("sha256:$hash" -cne $asset.digest) { throw "Published executable checksum mismatch for $Tag" }
+
+    @'
+from pathlib import Path
+from PyInstaller.archive.readers import CArchiveReader
+
+previous = CArchiveReader("build/previous-PCfishMate.exe")
+if previous.extract("loader.zip") == Path("build/loader.zip").read_bytes():
+    Path("build/plugin/PCFishInternal.dll").write_bytes(previous.extract("PCFishInternal.dll"))
+    print("Embedded the published game module unchanged")
+else:
+    print("Loader changed; embedding the freshly built game module")
+'@ | python -
+    if ($LASTEXITCODE) { throw "Could not read the published game module for $Tag" }
+}
+
 $previousPythonPath = $env:PYTHONPATH
 Push-Location $PSScriptRoot
 try {
@@ -19,6 +57,7 @@ try {
     python -m pip install --upgrade --target build/python pyinstaller==6.22.3 UnityPy==1.25.4
     if ($LASTEXITCODE) { exit $LASTEXITCODE }
     $env:PYTHONPATH = (Resolve-Path build/python).Path
+    if ($PreviousRelease) { Restore-PublishedModule -Tag $PreviousRelease }
     # Sprite.image imports UnityPy.export, which eagerly imports the audio converter.
     # PCfishMate only reads images, so leave that converter unloaded in the bundled copy.
     $exports = 'build/python/UnityPy/export/__init__.py'

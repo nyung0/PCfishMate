@@ -19,6 +19,8 @@ jobs:
       DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false'
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 6.0.428
@@ -28,7 +30,15 @@ jobs:
           architecture: x64
       - name: Build Windows executable
         shell: pwsh
-        run: ./build-windows.ps1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $previous = gh api "repos/$env:GITHUB_REPOSITORY/releases/latest" --jq .tag_name
+          if ($LASTEXITCODE -eq 0 -and $previous -and $env:GITHUB_REPOSITORY -eq 'nyung0/PCfishMate') {
+            ./build-windows.ps1 -PreviousRelease $previous
+          } else {
+            ./build-windows.ps1
+          }
       - name: Upload verified Windows package
         uses: actions/upload-artifact@v4
         with:
