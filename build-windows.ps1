@@ -16,7 +16,7 @@ try {
     $core = (Resolve-Path build/loader/BepInEx/core).Path
     dotnet build internal/PCFishInternal.csproj -c Release "-p:BepInExCore=$core" -o build/plugin
     if ($LASTEXITCODE) { exit $LASTEXITCODE }
-    python -m pip install --upgrade --target build/python pyinstaller==6.22.3 UnityPy==1.25.4 pystray==0.19.5
+    python -m pip install --upgrade --target build/python pyinstaller==6.22.3 UnityPy==1.25.4
     if ($LASTEXITCODE) { exit $LASTEXITCODE }
     $env:PYTHONPATH = (Resolve-Path build/python).Path
     # Sprite.image imports UnityPy.export, which eagerly imports the audio converter.
@@ -26,7 +26,7 @@ try {
     if ($source -notmatch '(?m)^    AudioClipConverter,\r?$') { throw 'Unexpected UnityPy export layout' }
     $source -replace '(?m)^    (AudioClipConverter|"AudioClipConverter"),\r?\n', '' |
         Set-Content $exports -Encoding utf8NoBOM
-    python -m PyInstaller --paths . --icon internal/pcfish.ico --add-data 'internal/pcfish.ico:.' --add-data 'internal/pcfish-badge.png:.' --collect-data UnityPy --collect-data archspec --exclude-module fmod_toolkit --exclude-module pyfmodex --noconfirm --onefile --windowed --name PCfishMate --add-data 'internal/release-version.txt:.' --add-data 'build/6000.0.76.zip:.' --add-data 'build/loader.zip:.' --add-data 'build/plugin/PCFishInternal.dll:.' internal/controller.py
+    python -m PyInstaller --paths . --icon internal/pcfish.ico --add-data 'internal/pcfish.ico:.' --add-data 'internal/pcfish-badge.png:.' --add-data 'internal/color-tools:color-tools' --collect-data UnityPy --collect-data archspec --exclude-module fmod_toolkit --exclude-module pyfmodex --noconfirm --onefile --windowed --name PCfishMate --add-data 'internal/release-version.txt:.' --add-data 'build/6000.0.76.zip:.' --add-data 'build/loader.zip:.' --add-data 'build/plugin/PCFishInternal.dll:.' internal/controller.py
     if ($LASTEXITCODE) { exit $LASTEXITCODE }
     $archive = python -m PyInstaller.utils.cliutils.archive_viewer --list dist/PCfishMate.exe
     if ($LASTEXITCODE -or !($archive -match 'pcfish\.ico') -or !($archive -match 'pcfish-badge\.png') -or !($archive -match 'release-version\.txt')) {

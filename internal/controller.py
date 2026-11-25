@@ -34,6 +34,7 @@ if not getattr(sys, "frozen", False):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from catalog_tab import CatalogTab, catalog_art
+from color_tab import ColorTab
 from favorite_notifications import APP_ID, DEFAULT_NOTIFICATION_SETTINGS, flash_taskbar, notify_favorites
 from ocean_ui import OCEAN, PANEL, RARITIES, RARITY_COLORS, TEXT, WATER, ocean_style, rounded_image, game_notebook_frame
 from season_tab import GameData, SeasonTab, load_automation_icons, load_grade_icon, load_install_fish, load_season_art
@@ -819,9 +820,7 @@ class Controller:
                 lambda: set_taskbar_icon(root, icon)) if event.widget is root else None, add="+")
         root.geometry("820x650")
         root.minsize(670, 410)
-        self.tray = None
-        self.tray_actions = Queue()
-        root.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
+        root.protocol("WM_DELETE_WINDOW", self.close)
         ocean_style(root)
         title_bar = tk.Frame(root, bg=WATER)
         title_bar.pack(fill="x")
@@ -873,10 +872,15 @@ class Controller:
         )
         tabs.add(season, text="시즌합성")
         tabs.add(catalog, text="도감")
+        self.color_tab = colors = ColorTab(tabs, game, BRIDGE)
+        tabs.add(colors, text="색상")
+        if colors.settings.is_file():
+            colors.after_idle(colors.refresh)
 
         def refresh_tab(_event):
             active = tabs.select()
-            for tab in (season, catalog):
+            root.minsize(670, colors.MIN_WINDOW_HEIGHT if active == str(colors) else 410)
+            for tab in (season, catalog, colors):
                 if active == str(tab):
                     tab.after_idle(tab.refresh)
 
@@ -1520,7 +1524,15 @@ class Controller:
         BRIDGE.mkdir(parents=True, exist_ok=True)
         temporary = BRIDGE / f"{self.run_id}.tmp"
         temporary.write_text(json.dumps(command), encoding="utf-8")
-        temporary.replace(BRIDGE / "command.json")
+        target = BRIDGE / "command.json"
+        for delay in (0.015, 0.030, 0.060, None):
+            try:
+                temporary.replace(target)
+                return
+            except OSError as error:
+                if delay is None or getattr(error, "winerror", None) not in (5, 32, 33):
+                    raise
+                time.sleep(delay)
 
     def start(self):
         try:
@@ -1579,58 +1591,7 @@ class Controller:
         self.command.update(modes)
         self.tick_status()
 
-    def show_window(self):
-        self.root.deiconify()
-        self.root.lift()
-        self.root.focus_force()
-
-    def hide_to_tray(self):
-        if self.tray is None:
-            try:
-                import pystray
-                from PIL import Image
-                with Image.open(ASSETS / "pcfish.ico") as image:
-                    icon = image.convert("RGBA")
-                def action(name):
-                    return lambda *_: self.tray_actions.put(name)
-                tray = pystray.Icon(APP_ID, icon, APP_NAME, menu=pystray.Menu(
-                    pystray.MenuItem("열기", action("show"), default=True),
-                    pystray.MenuItem("자동화 시작", action("start")),
-                    pystray.MenuItem("자동화 중지", action("stop")),
-                    pystray.Menu.SEPARATOR,
-                    pystray.MenuItem("끝내기", action("exit")),
-                ))
-                tray.run_detached()
-                self.tray = tray
-            except (ImportError, OSError, RuntimeError) as error:
-                messagebox.showerror("트레이 실행 실패", str(error), parent=self.root)
-                return
-        if self.settings_window is not None and self.settings_window.winfo_exists():
-            self.settings_window.destroy()
-        if self.log_window is not None and self.log_window.winfo_exists():
-            self.log_window.destroy()
-        self.root.withdraw()
-
-    def poll_tray(self):
-        try:
-            action = self.tray_actions.get_nowait()
-        except Empty:
-            return False
-        if action == "exit":
-            self.close()
-            return True
-        if action == "show":
-            self.show_window()
-        elif action == "start":
-            self.start()
-        elif action == "stop":
-            self.stop()
-        return False
-
     def close(self):
-        if self.tray is not None:
-            self.tray.stop()
-            self.tray = None
         if self.pending_update is not None:
             staged = self.pending_update
             try:
@@ -1638,7 +1599,8 @@ class Controller:
             except OSError:
                 pass
             self.pending_update = None
-        self.stop()
+        if self.command is not None:
+            self.stop()
         self.root.destroy()
 
     def update_heart_status(self, state):
@@ -1701,12 +1663,16 @@ class Controller:
                                 self.command.update(self.mode_settings())
                             except (OSError, ValueError):
                                 self.command["Merge"]["SeasonMaterials"] = None
-                        self.write(self.command)
+                        try:
+                            self.write(self.command)
+                        except OSError:
+                            self.status.set("자동화 명령 전달 대기 중 · 잠시 후 다시 시도합니다")
             else:
                 self.status.set("게임 플러그인 연결 대기 중")
         except (OSError, ValueError, KeyError):
             self.status.set("게임 플러그인 연결 대기 중")
         self.update_heart_status(heart_state)
+        self.color_tab.update_connection(heart_state)
         if self.connection_deadline is not None:
             if time.monotonic() < self.connection_deadline:
                 self.status.set("게임 시작 중 · 모듈이 연결되면 자동화를 시작합니다.")
@@ -1717,8 +1683,6 @@ class Controller:
         self.start_button.state(["disabled"] if self.connection_deadline is not None else ["!disabled"])
 
     def tick(self):
-        if self.poll_tray():
-            return
         self.tick_status()
         self.refresh_log()
         self.refresh_log_version()
@@ -1788,8 +1752,17 @@ if __name__ == "__main__":
             raise SystemExit(1)
         raise SystemExit(0)
     if sys.argv[1:] == ["--check-image-runtime"]:
+        from PIL import Image
         from UnityPy.export import SpriteHelper
-        raise SystemExit(0 if callable(SpriteHelper.get_image_from_sprite) else 1)
+        from fish_color_assets import TextureRegion
+
+        region = TextureRegion("check", 2, 2, 0, 0, 2, 2)
+        image = Image.frombytes("RGBA", (2, 2), bytes(range(16)))
+        round_trip = region.decode(region.encode(image)).tobytes() == image.tobytes()
+        for name in ("hand", "brush", "bucket"):
+            with Image.open(ASSETS / "color-tools" / f"{name}.png") as icon:
+                icon.verify()
+        raise SystemExit(0 if callable(SpriteHelper.get_image_from_sprite) and round_trip else 1)
     if getattr(sys, "frozen", False) and len(sys.argv) == 4 and sys.argv[1] == "--apply-update":
         try:
             apply_update(int(sys.argv[2]), Path(sys.argv[3]))

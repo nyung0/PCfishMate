@@ -8,7 +8,7 @@ using BepInEx.Configuration;
 using BepInEx.Unity.IL2CPP;
 using HarmonyLib;
 
-[BepInPlugin("pcfish.helper.internal", "PC Fish Internal Breeding", "0.3.0")]
+[BepInPlugin("pcfish.helper.internal", "PC Fish Internal Breeding", "0.3.3")]
 public sealed class Plugin : BasePlugin
 {
     private const BindingFlags Members = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
@@ -45,10 +45,11 @@ public sealed class Plugin : BasePlugin
     private bool mergeHooksReady, upgradeHookReady;
     private bool mergeFailed, breedFailed, upgradeFailed;
     private string mergeFailure = "", breedFailure = "", upgradeFailure = "";
-    private bool bridgeReadFailed;
+    private bool bridgeReadFailed, bridgeWriteFailed;
     private bool mergeSlotsOwned, breedSlotsOwned;
     private (int Max, long Interval)? heartConfig;
     private int? fishCapacity;
+    private LiveFishColors fishColors = null!;
 
     [DllImport("user32.dll")]
     private static extern short GetAsyncKeyState(int key);
@@ -56,6 +57,7 @@ public sealed class Plugin : BasePlugin
     public override void Load()
     {
         instance = this;
+        fishColors = new LiveFishColors(Path.Combine(bridge, "fish-colors.json"), message => Log.LogWarning(message));
         enabled = Config.Bind("Breeding", "Enabled", false, "Allow the plugin to spend breeding hearts. F8 stops it.");
         enabled.Value = false;
         interval = Config.Bind("Breeding", "IntervalSeconds", 10, "Minimum seconds between breeding calls.");
@@ -207,20 +209,41 @@ public sealed class Plugin : BasePlugin
         }
     }
 
-    private Command? ReadCommand()
+    private bool TryReadCommand(out Command? latest)
     {
+        latest = null;
         var path = Path.Combine(bridge, "command.json");
-        return DateTime.UtcNow - File.GetLastWriteTimeUtc(path) < TimeSpan.FromSeconds(5)
-            ? JsonSerializer.Deserialize<Command>(File.ReadAllText(path))
-            : null;
+        try
+        {
+            if (DateTime.UtcNow - File.GetLastWriteTimeUtc(path) < TimeSpan.FromSeconds(5))
+            {
+                // Keep the command readable while the controller replaces it atomically.
+                using var stream = File.Open(path, FileMode.Open, FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete);
+                latest = JsonSerializer.Deserialize<Command>(stream);
+            }
+        }
+        catch (Exception error) when (error is FileNotFoundException or DirectoryNotFoundException)
+        {
+            // The file may have disappeared between checking its timestamp and opening it.
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
+        {
+            if (!bridgeReadFailed)
+                Log.LogWarning($"자동화 명령 읽기 재시도 · {error.Message}");
+            bridgeReadFailed = true;
+            return false;
+        }
+        bridgeReadFailed = false;
+        return true;
     }
 
     private void PollBridge()
     {
-        try
+        var colors = fishColors.Poll(clock.Elapsed.TotalSeconds);
+        if (TryReadCommand(out var latest))
         {
-            Directory.CreateDirectory(bridge);
-            command = ReadCommand();
+            command = latest;
             if (command is { Enabled: true } && command.RunId != lastStartedRun && command.RunId != blockedRun)
             {
                 lastStartedRun = command.RunId;
@@ -235,18 +258,23 @@ public sealed class Plugin : BasePlugin
             if (requested != bridgeEnabled)
                 Record(requested ? "자동화 시작" : "자동화 중지", "컨트롤러");
             bridgeEnabled = requested;
+        }
+        try
+        {
+            Directory.CreateDirectory(bridge);
             var hearts = ReadHeartStatus();
             var season = ReadSeasonStatus();
             var status = Path.Combine(bridge, "status.json");
             var temporary = status + ".tmp";
             File.WriteAllText(temporary, JsonSerializer.Serialize(new {
                 Version = 3,
+                Colors = colors,
                 Running = bridgeEnabled
-                    ? (command?.Breed != false && !breedFailed)
+                    ? !bridgeReadFailed && ((command?.Breed != false && !breedFailed)
                       || (command?.AutoMerge == true && mergeHooksReady && !mergeFailed)
-                      || (command?.TankUpgrade == true && upgradeHookReady && !upgradeFailed)
+                      || (command?.TankUpgrade == true && upgradeHookReady && !upgradeFailed))
                     : enabled.Value && !breedFailed,
-                Message = message,
+                Message = bridgeEnabled && bridgeReadFailed ? "자동화 명령 확인 중 · 잠시 후 다시 시도합니다" : message,
                 Season = season,
                 FishCapacity = ReadFishCapacity(),
                 GameRoot = Paths.GameRootPath,
@@ -261,14 +289,13 @@ public sealed class Plugin : BasePlugin
                 }.Where(error => error.Length > 0),
             }));
             File.Move(temporary, status, overwrite: true);
-            bridgeReadFailed = false;
+            bridgeWriteFailed = false;
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
         {
-            bridgeEnabled = false;
-            if (!bridgeReadFailed)
-                Log.LogWarning($"컨트롤러 연결 오류 · {error.GetBaseException().Message}");
-            bridgeReadFailed = true;
+            if (!bridgeWriteFailed)
+                Log.LogWarning($"자동화 상태 쓰기 재시도 · {error.GetBaseException().Message}");
+            bridgeWriteFailed = true;
         }
     }
 
@@ -308,7 +335,7 @@ public sealed class Plugin : BasePlugin
                 upgradeFailure = ReportFailure("수조 레벨업", error);
             }
         }
-        if (!enabled.Value && !bridgeEnabled)
+        if (!enabled.Value && (!bridgeEnabled || bridgeReadFailed))
             return;
         if (mergeHooksReady && !mergeFailed && bridgeEnabled && command?.AutoMerge == true && RunMerge(now))
             return;
@@ -488,7 +515,7 @@ public sealed class Plugin : BasePlugin
         // Read the current selection again before spending a heart.
         if (bridgeEnabled)
         {
-            var latest = ReadCommand();
+            bool read = TryReadCommand(out var latest);
             var allowed = latest?.Rarities;
             if (latest is null || !latest.Enabled || latest.Breed == false || allowed is null
                 || latest.RunId != bridgeRun || parents.Any(parent => !allowed.Contains(parent.Rarity)
@@ -498,7 +525,7 @@ public sealed class Plugin : BasePlugin
             {
                 Call(breed, "ResetParentFishList");
                 breedSlotsOwned = false;
-                message = "교배 설정이 변경되어 다시 확인 중";
+                message = read ? "교배 설정이 변경되어 다시 확인 중" : "교배 명령 확인 중";
                 return;
             }
         }
@@ -637,7 +664,7 @@ public sealed class Plugin : BasePlugin
                 : "게임이 합성 재료 등록을 거절했습니다";
             return true;
         }
-        var latest = ReadCommand();
+        TryReadCommand(out var latest);
         var currentOptions = latest?.Merge;
         if (latest is not { Enabled: true, AutoMerge: true } || latest.RunId != bridgeRun ||
             currentOptions is null || batch.Any(item => !MergeEligible(item, currentOptions, grade, DateTimeOffset.UtcNow)) ||
@@ -737,7 +764,7 @@ public sealed class Plugin : BasePlugin
                 Call(popup, "Ok");
             return true;
         }
-        if (!bridgeEnabled || command?.TankUpgrade != true || now < nextUpgrade
+        if (!bridgeEnabled || bridgeReadFailed || command?.TankUpgrade != true || now < nextUpgrade
             || data is null || Call(data, "IsCheckTankLevelUp") is not true)
             return false;
         if (ui is null || Read(ui, "isProcessing") is not false)
@@ -750,6 +777,9 @@ public sealed class Plugin : BasePlugin
             Call(ui, "ChangeTabMenu", 0);
             return true;
         }
+        if (!TryReadCommand(out var latest) || latest is not { Enabled: true, TankUpgrade: true }
+            || latest.RunId != bridgeRun)
+            return false;
         upgradeFrom = (int)Read(data, "tankLevel")!;
         upgradeDeadline = now + 15;
         Call(home, "TankLevelUp");
